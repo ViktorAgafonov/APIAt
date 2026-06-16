@@ -1,0 +1,7 @@
+private.txt
+.env
+.venv/
+data/
+__pycache__/
+*.pyc
+.pytest_cache/

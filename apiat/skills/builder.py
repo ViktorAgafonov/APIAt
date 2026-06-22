@@ -11,21 +11,26 @@ from pathlib import Path
 from ..config import Settings
 from ..intent.router import LlmRouter
 from ..utils.logging import get_logger
-from .sandbox import DockerSandbox, SandboxResult
+from .sandbox import DockerSandbox, SkillConfig, SandboxResult
 
 logger = get_logger(__name__)
 
-# Контекст среды — передаётся в промт генерации
-_ENV_CONTEXT = """
+# Базовый контекст среды — передаётся в промт генерации
+_ENV_CONTEXT_BASE = """
 Среда выполнения:
 - Python 3.12, Linux (Ubuntu 24.04), VPS сервер
-- Доступные stdlib-модули: os, sys, subprocess, pathlib, json, datetime, psutil (установлен)
-- НЕТ доступа к сети внутри sandbox (--network none)
-- НЕТ доступа к файловой системе хоста (только /tmp)
-- RAM лимит: 128 MB, CPU: 50%, timeout: 30 сек
+- Доступные модули: stdlib + psutil + requests (все установлены)
 - Результат должен быть напечатан через print() в stdout
-- Ответ пользователю должен быть в формате HTML (теги <h2>, <p>, <ul>, <li>, <b>)
-- Код должен быть полностью самодостаточным, в одном файле, без внешних зависимостей кроме stdlib и psutil
+- Ответ пользователю — в формате HTML (теги <h2>, <p>, <ul>, <li>, <b>)
+- Код должен быть полностью самодостаточным, в одном файле, без внешних import кроме stdlib/psutil/requests
+- Первые строки кода — метаданные лимитов sandbox (# skill:key=value):
+    # skill:profile=isolated|network|storage
+    # skill:memory=128m      (лимит RAM)
+    # skill:timeout=30       (секунд)
+    # skill:tmpfs=32m        (размер /tmp)
+    # skill:storage_mount=/opt/apiat/data/downloads/done  (для profile=storage)
+Параметры sandbox для этого навыка:
+{skill_config}
 """
 
 _GENERATE_PROMPT = """\
@@ -37,7 +42,8 @@ _GENERATE_PROMPT = """\
 ТЕХНИЧЕСКИЕ ТРЕБОВАНИЯ:
 {env_context}
 
-Верни ТОЛЬКО код Python без пояснений и без markdown-блоков. Первая строка — сам код.
+Верни ТОЛЬКО код Python без пояснений и без markdown-блоков.
+Первые строки файла — метаданные (# skill:...) если нужны нестандартные лимиты, затем сам код.
 """
 
 _REVIEW_PROMPT = """\
@@ -83,7 +89,8 @@ class SkillBuilder:
     def __init__(self, settings: Settings, skills_dir: Path) -> None:
         self._settings = settings
         self._router = LlmRouter(settings.llm_providers())
-        self._sandbox = DockerSandbox()
+        self._data_dir = settings.data_dir
+        self._sandbox = DockerSandbox(data_dir=settings.data_dir)
         self._skills_dir = skills_dir
         self._pending_dir = skills_dir / "pending"
         self._pending_dir.mkdir(parents=True, exist_ok=True)
@@ -100,7 +107,8 @@ class SkillBuilder:
         if not code:
             result.error = "LLM не вернул код"
             return result
-        result.steps.append(f"   Сгенерировано {len(code)} символов кода")
+        cfg = SkillConfig.from_code(code)
+        result.steps.append(f"   Сгенерировано {len(code)} символов, профиль: {cfg.profile}")
 
         # Шаг 2: ревью (только если работаем через primary LLM)
         if not using_fallback:
@@ -118,8 +126,8 @@ class SkillBuilder:
             result.review_verdict = "пропущено (fallback)"
 
         # Шаг 3: sandbox-тест
-        result.steps.append("3. Запуск в Docker sandbox...")
-        sandbox_res: SandboxResult = self._sandbox.run(code)
+        result.steps.append(f"3. Запуск в Docker sandbox (profile={cfg.profile})...")
+        sandbox_res: SandboxResult = self._sandbox.run(code, cfg)
         result.sandbox_output = sandbox_res.output
         if not sandbox_res.success:
             result.steps.append(f"   Sandbox: ошибка (exit {sandbox_res.exit_code})")
@@ -199,9 +207,11 @@ class SkillBuilder:
         return "\n".join(lines)
 
     async def _generate_code(self, user_prompt: str) -> str:
+        default_cfg = SkillConfig()
+        env_context = _ENV_CONTEXT_BASE.format(skill_config=default_cfg.describe())
         prompt = _GENERATE_PROMPT.format(
             user_prompt=user_prompt,
-            env_context=_ENV_CONTEXT,
+            env_context=env_context,
         )
         raw = await self._router.complete(prompt)
         return _extract_code(raw)

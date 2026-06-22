@@ -112,74 +112,121 @@ cd /opt/apiat && git pull origin main && systemctl restart apiat
 
 ### Ручное написание модулей навыков
 
-Навык — обычный Python-файл, помещённый в `data/skills/` (закреплённые)
-или `data/skills/pending/` (ожидают подтверждения).
+Навык — Python-файл в `data/skills/` (закреплённые) или `data/skills/pending/` (ожидают подтверждения).
 
-**Требования к файлу навыка:**
+**Обязательные требования:**
 
 1. **Один файл** — весь код в одном `.py`, никаких относительных импортов.
-2. **Имя файла** — `snake_case`, описывает назначение: `server_status.py`, `disk_report.py`.
-3. **Вывод** — результат только через `print()` в stdout, ничего не возвращать из функций верхнего уровня.
-4. **Формат вывода** — HTML: теги `<h2>`, `<p>`, `<ul>`, `<li>`, `<b>`. Агент вставит вывод в тело письма как есть.
-5. **Зависимости** — только `stdlib` + `psutil` (уже установлен). Никаких `pip install` внутри кода.
-6. **Без сети** — навык запускается в sandbox без сетевого доступа (`--network none`). Данные только из системы.
-7. **Без записи на диск** — файловая система хоста недоступна, только `/tmp` (32 MB).
-8. **Timeout** — код должен завершиться за 30 секунд.
-9. **Без `if __name__ == "__main__"`** не требуется, но допускается.
+2. **Имя файла** — `snake_case`: `server_status.py`, `parse_page.py`, `split_archive.py`.
+3. **Вывод** — только через `print()` в stdout.
+4. **Формат вывода** — HTML: теги `<h2>`, `<p>`, `<ul>`, `<li>`, `<b>`. Агент вставит в тело письма как есть.
+5. **Зависимости** — только `stdlib` + `psutil` + `requests` (все установлены). Без `pip install`.
+6. **Timeout** — код должен завершиться за время из метаданных (по умолчанию 30 сек).
 
-**Минимальный шаблон:**
+**Профили изоляции sandbox:**
+
+| Профиль | Сеть | Диск хоста | Типичное применение |
+|---|---|---|---|
+| `isolated` | нет | нет, только `/tmp` 32 MB | статус, отчёты, вычисления |
+| `network` | HTTP/HTTPS | нет, только `/tmp` 32 MB | парсинг URL, HTTP-запросы |
+| `storage` | нет | `/data` (rw, путь из метаданных) | архивы, split-файлы, обработка загрузок |
+
+Профиль по умолчанию — `isolated`. Для смены — метаданные в начале файла.
+
+**Метаданные лимитов** (первые строки файла, необязательны если устраивают дефолты):
 
 ```python
-import datetime
-import os
-
-now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-uptime = open("/proc/uptime").read().split()[0]
-uptime_h = round(float(uptime) / 3600, 1)
-
-print(f"<h2>Статус сервера</h2>")
-print(f"<p><b>Время:</b> {now}</p>")
-print(f"<p><b>Uptime:</b> {uptime_h} ч</p>")
+# skill:profile=isolated   # isolated | network | storage
+# skill:memory=128m        # лимит RAM
+# skill:timeout=30         # секунд до timeout
+# skill:tmpfs=32m          # размер /tmp
+# skill:storage_mount=/opt/apiat/data/downloads/done  # для profile=storage
 ```
 
-**Использование `psutil`:**
+**Шаблон: изолированный (статус сервера)**
 
 ```python
-import psutil
+# skill:profile=isolated
+import datetime, psutil
 
 mem = psutil.virtual_memory()
 disk = psutil.disk_usage("/")
+uptime_h = round(float(open("/proc/uptime").read().split()[0]) / 3600, 1)
 
-print("<ul>")
-print(f"<li><b>RAM:</b> {mem.used // 1024**2} / {mem.total // 1024**2} MB ({mem.percent}%)</li>")
-print(f"<li><b>Disk /:</b> {disk.used // 1024**3} / {disk.total // 1024**3} GB ({disk.percent}%)</li>")
+print("<h2>Статус сервера</h2><ul>")
+print(f"<li><b>Время:</b> {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</li>")
+print(f"<li><b>Uptime:</b> {uptime_h} ч</li>")
+print(f"<li><b>RAM:</b> {mem.used//1024**2}/{mem.total//1024**2} MB ({mem.percent}%)</li>")
+print(f"<li><b>Disk:</b> {disk.used//1024**3}/{disk.total//1024**3} GB ({disk.percent}%)</li>")
 print("</ul>")
+```
+
+**Шаблон: сетевой (HTTP-запрос / парсинг)**
+
+```python
+# skill:profile=network
+# skill:timeout=20
+import requests
+
+url = "https://example.com/api/status"
+r = requests.get(url, timeout=10)
+data = r.json()
+
+print(f"<h2>Результат запроса</h2>")
+print(f"<p><b>Статус:</b> {r.status_code}</p>")
+print(f"<p>{data}</p>")
+```
+
+**Шаблон: storage (работа с файлами)**
+
+```python
+# skill:profile=storage
+# skill:storage_mount=/opt/apiat/data/downloads/done
+# skill:memory=256m
+# skill:timeout=60
+import os, zipfile
+
+files = os.listdir("/data")
+out = "/data/archive.zip"
+with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as zf:
+    for f in files:
+        if f != "archive.zip":
+            zf.write(f"/data/{f}", f)
+
+print(f"<h2>Архив создан</h2>")
+print(f"<p>Упакованных файлов: {len(files)}</p>")
+print(f"<p>Результат: /data/archive.zip ({os.path.getsize(out)//1024} KB)</p>")
 ```
 
 **Как добавить вручную:**
 
 ```bash
-# Напрямую в закреплённые (без подтверждения)
+# Напрямую в закреплённые (без подтверждения по письму)
 cp my_skill.py /opt/apiat/data/skills/my_skill.py
 
-# Или через pending (с подтверждением по письму)
+# Через pending (с подтверждением)
 cp my_skill.py /opt/apiat/data/skills/pending/my_skill.py
-# Затем отправить письмо: подтверди навык my_skill
+# Затем письмо: подтверди навык my_skill
 ```
 
-**Проверка навыка вручную на сервере:**
+**Проверка на сервере:**
 
 ```bash
 cd /opt/apiat
-# Без sandbox (быстро, для отладки)
+# Быстро без sandbox
 .venv/bin/python data/skills/my_skill.py
 
-# В Docker sandbox (как агент)
+# Точно как агент (isolated)
 docker run --rm --network none --memory 128m --read-only \
   --tmpfs /tmp:size=32m \
-  --volume /opt/apiat/data/skills:/sandbox:ro \
-  --workdir /sandbox \
-  python:3.12-slim python my_skill.py
+  --volume $(pwd)/data/skills:/sandbox:ro \
+  --workdir /sandbox python:3.12-slim python my_skill.py
+
+# Для network-профиля
+docker run --rm --network bridge --memory 128m --read-only \
+  --tmpfs /tmp:size=32m \
+  --volume $(pwd)/data/skills:/sandbox:ro \
+  --workdir /sandbox python:3.12-slim python my_skill.py
 ```
 
 ### Формат команды смены LLM

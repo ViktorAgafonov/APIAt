@@ -107,9 +107,10 @@ class Agent:
 
         self.storage.mark_mail_processed(mail.message_id, mail.sender)
 
-        # Нормализуем неразрывные пробелы и другие unicode-пробелы → обычный пробел
+        # Нормализуем неразрывные пробелы (\xa0 от inbox.ru и др.) → обычный пробел
         body = mail.body.replace("\xa0", " ").replace("\u2009", " ").replace("\u200b", "")
         mail = mail.model_copy(update={"body": body})
+        logger.debug("Тело письма (repr): %r", body[:200])
 
         # Команда оператора: обновить код с GitHub
         if _UPDATE_CMD_RE.search(mail.body):

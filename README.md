@@ -10,6 +10,12 @@
 Mail Gateway -> Intent Parser (LlmRouter/PydanticAI) -> Typed Task
    -> Task Planner -> Burr Workflow -> Tools -> Internet
    -> Result Generator -> Email Sender
+
+Команды оператора (email):
+   обнови код       -> git pull + pip install + restart
+   самообучись: ... -> LLM → ревью → Docker sandbox → подтверждение
+   список навыков   -> отчёт о закреплённых и pending навыках
+   переключи llm    -> смена/статус LLM-провайдеров
 ```
 
 Структура пакета `apiat/`:
@@ -21,7 +27,8 @@ Mail Gateway -> Intent Parser (LlmRouter/PydanticAI) -> Typed Task
 - `intent/` — LlmRouter (failover), парсер интентов, SelfCorrector.
 - `planner/`, `workflow/` — выбор и исполнение Burr-workflow.
 - `tools/` — абстракция инструмента, реестр и реализации.
-- `utils/` — логирование и трассировка.
+- `skills/` — система навыков: генерация, ревью, Docker sandbox, подтверждение.
+- `utils/` — логирование, файловый кэш (tmpfs/disk), TTL-очистка.
 
 ## Установка
 
@@ -101,6 +108,78 @@ cd /opt/apiat && git pull origin main && systemctl restart apiat
 
 подтверди навык <имя>
   → data/skills/pending/<имя>.py → data/skills/<имя>.py
+```
+
+### Ручное написание модулей навыков
+
+Навык — обычный Python-файл, помещённый в `data/skills/` (закреплённые)
+или `data/skills/pending/` (ожидают подтверждения).
+
+**Требования к файлу навыка:**
+
+1. **Один файл** — весь код в одном `.py`, никаких относительных импортов.
+2. **Имя файла** — `snake_case`, описывает назначение: `server_status.py`, `disk_report.py`.
+3. **Вывод** — результат только через `print()` в stdout, ничего не возвращать из функций верхнего уровня.
+4. **Формат вывода** — HTML: теги `<h2>`, `<p>`, `<ul>`, `<li>`, `<b>`. Агент вставит вывод в тело письма как есть.
+5. **Зависимости** — только `stdlib` + `psutil` (уже установлен). Никаких `pip install` внутри кода.
+6. **Без сети** — навык запускается в sandbox без сетевого доступа (`--network none`). Данные только из системы.
+7. **Без записи на диск** — файловая система хоста недоступна, только `/tmp` (32 MB).
+8. **Timeout** — код должен завершиться за 30 секунд.
+9. **Без `if __name__ == "__main__"`** не требуется, но допускается.
+
+**Минимальный шаблон:**
+
+```python
+import datetime
+import os
+
+now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+uptime = open("/proc/uptime").read().split()[0]
+uptime_h = round(float(uptime) / 3600, 1)
+
+print(f"<h2>Статус сервера</h2>")
+print(f"<p><b>Время:</b> {now}</p>")
+print(f"<p><b>Uptime:</b> {uptime_h} ч</p>")
+```
+
+**Использование `psutil`:**
+
+```python
+import psutil
+
+mem = psutil.virtual_memory()
+disk = psutil.disk_usage("/")
+
+print("<ul>")
+print(f"<li><b>RAM:</b> {mem.used // 1024**2} / {mem.total // 1024**2} MB ({mem.percent}%)</li>")
+print(f"<li><b>Disk /:</b> {disk.used // 1024**3} / {disk.total // 1024**3} GB ({disk.percent}%)</li>")
+print("</ul>")
+```
+
+**Как добавить вручную:**
+
+```bash
+# Напрямую в закреплённые (без подтверждения)
+cp my_skill.py /opt/apiat/data/skills/my_skill.py
+
+# Или через pending (с подтверждением по письму)
+cp my_skill.py /opt/apiat/data/skills/pending/my_skill.py
+# Затем отправить письмо: подтверди навык my_skill
+```
+
+**Проверка навыка вручную на сервере:**
+
+```bash
+cd /opt/apiat
+# Без sandbox (быстро, для отладки)
+.venv/bin/python data/skills/my_skill.py
+
+# В Docker sandbox (как агент)
+docker run --rm --network none --memory 128m --read-only \
+  --tmpfs /tmp:size=32m \
+  --volume /opt/apiat/data/skills:/sandbox:ro \
+  --workdir /sandbox \
+  python:3.12-slim python my_skill.py
 ```
 
 ### Формат команды смены LLM

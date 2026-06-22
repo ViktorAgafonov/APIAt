@@ -46,15 +46,73 @@ async def _run_once(agent: Agent) -> None:
     await agent.run_once()
 
 
+class _PollMode:
+    """Адаптивный интервал опроса IMAP.
+
+    NORMAL  — базовый интервал ± 9 сек (из настроек, ~60 сек)
+    FAST    — 17–24 сек: ≥2 запросов за последние 2 мин
+    IDLE    — 2–7 мин: простой >30 мин
+    Снижение FAST→NORMAL: нет запросов >9 мин.
+    """
+
+    NORMAL = "normal"
+    FAST   = "fast"
+    IDLE   = "idle"
+
+    def __init__(self, base_interval: int) -> None:
+        self._base = base_interval
+        self._mode = self.NORMAL
+        self._last_activity = time.monotonic()   # последний запрос
+        self._recent: list[float] = []           # время последних запросов
+
+    def record_activity(self, count: int) -> None:
+        """Вызывается после итерации с ненулевым числом писем."""
+        if count > 0:
+            now = time.monotonic()
+            self._last_activity = now
+            self._recent.append(now)
+
+    def next_sleep(self) -> float:
+        now = time.monotonic()
+        idle_sec = now - self._last_activity
+
+        # Обрезаем recent: только последние 2 минуты
+        self._recent = [t for t in self._recent if now - t <= 120]
+
+        prev = self._mode
+
+        if len(self._recent) >= 2:
+            self._mode = self.FAST
+        elif idle_sec > 30 * 60:
+            self._mode = self.IDLE
+        elif self._mode == self.FAST and idle_sec > 9 * 60:
+            self._mode = self.NORMAL
+        elif self._mode == self.IDLE and idle_sec <= 30 * 60:
+            self._mode = self.NORMAL
+
+        if self._mode != prev:
+            logger.info("Polling mode: %s → %s (простой %.0f сек)", prev, self._mode, idle_sec)
+
+        if self._mode == self.FAST:
+            return random.uniform(17, 24)
+        if self._mode == self.IDLE:
+            return random.uniform(120, 420)
+        return self._base + random.randint(-9, 9)
+
+
 async def _run_daemon(agent: Agent, interval: int) -> None:
     logger.info("Запуск демона, базовый интервал: %d сек", interval)
+    poller = _PollMode(interval)
     while True:
         try:
-            await agent.run_once()
+            count = await agent.run_once()
+            poller.record_activity(count)
         except Exception:  # noqa: BLE001 - демон не должен падать на одной итерации
             logger.exception("Ошибка итерации демона")
-        jitter = random.randint(-9, 9)
-        time.sleep(interval + jitter)
+            count = 0
+        sleep_sec = poller.next_sleep()
+        logger.debug("Следующий опрос через %.0f сек (режим: %s)", sleep_sec, poller._mode)
+        time.sleep(sleep_sec)
 
 
 def main(argv: list[str] | None = None) -> int:

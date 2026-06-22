@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-_DOCKER_IMAGE = "python:3.12-slim"
+_DOCKER_IMAGE = "apiat-sandbox:latest"
 
 # Дефолтные лимиты
 _DEFAULTS: dict[str, str | int] = {

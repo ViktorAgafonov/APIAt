@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import subprocess
 import time
+from pathlib import Path
 
 from .config import get_settings
 from .main import Agent
@@ -12,6 +14,31 @@ from .utils.cache import cleanup_stale
 from .utils.logging import get_logger, setup_logging
 
 logger = get_logger(__name__)
+
+_DOCKERFILE = Path(__file__).parent.parent / "docker" / "skill-sandbox.Dockerfile"
+
+
+def _ensure_sandbox_image() -> None:
+    """Собирает образ apiat-sandbox если его нет или Dockerfile новее образа."""
+    try:
+        r = subprocess.run(
+            ["docker", "image", "inspect", "apiat-sandbox:latest"],
+            capture_output=True, timeout=10,
+        )
+        if r.returncode == 0:
+            return  # образ уже есть
+        if not _DOCKERFILE.exists():
+            logger.warning("Dockerfile для sandbox не найден: %s", _DOCKERFILE)
+            return
+        logger.info("Сборка образа apiat-sandbox...")
+        subprocess.run(
+            ["docker", "build", "-f", str(_DOCKERFILE), "-t", "apiat-sandbox:latest",
+             str(_DOCKERFILE.parent)],
+            check=True, timeout=120,
+        )
+        logger.info("Образ apiat-sandbox собран")
+    except (subprocess.SubprocessError, FileNotFoundError):
+        logger.warning("Docker недоступен, sandbox навыков не будет работать")
 
 
 async def _run_once(agent: Agent) -> None:
@@ -39,6 +66,7 @@ def main(argv: list[str] | None = None) -> int:
     setup_logging(settings.log_level)
     settings.ensure_dirs()
     cleanup_stale(settings.data_dir)
+    _ensure_sandbox_image()
     agent = Agent(settings)
 
     if args.once:

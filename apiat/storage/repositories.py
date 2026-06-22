@@ -25,14 +25,12 @@ class Storage:
         """Удаляет устаревшие записи чтобы БД не росла бесконечно."""
         conn = self._conn()
         try:
-            conn.executescript("""
-                DELETE FROM processed_mail WHERE processed_at < datetime('now', '-90 days');
-                DELETE FROM history        WHERE created_at  < datetime('now', '-45 days');
-                DELETE FROM results        WHERE created_at  < datetime('now', '-45 days');
-                DELETE FROM tasks          WHERE updated_at  < datetime('now', '-45 days');
-            """)
-            conn.execute("VACUUM")
+            conn.execute("DELETE FROM processed_mail WHERE processed_at < datetime('now', '-90 days')")
+            conn.execute("DELETE FROM history        WHERE created_at  < datetime('now', '-45 days')")
+            conn.execute("DELETE FROM results        WHERE created_at  < datetime('now', '-45 days')")
+            conn.execute("DELETE FROM tasks          WHERE updated_at  < datetime('now', '-45 days')")
             conn.commit()
+            conn.execute("VACUUM")
         finally:
             conn.close()
 

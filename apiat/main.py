@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 import subprocess
 import time
+from pathlib import Path
 
 from .config import Settings, get_settings
 from .gateway.imap_client import ImapClient
@@ -33,6 +34,12 @@ _LLM_CMD_RE = re.compile(
 # Команда самообновления кода с GitHub
 _UPDATE_CMD_RE = re.compile(
     r"(обнови\s*код|update\s*code|git\s*pull)",
+    re.IGNORECASE,
+)
+
+# Команда пересборки sandbox-образа
+_UPDATE_SANDBOX_RE = re.compile(
+    r"(обнови\s*среду|update\s*sandbox|rebuild\s*sandbox)",
     re.IGNORECASE,
 )
 
@@ -115,6 +122,11 @@ class Agent:
         # Команда оператора: обновить код с GitHub
         if _UPDATE_CMD_RE.search(mail.body):
             await self._handle_update_command(mail)
+            return
+
+        # Команда оператора: пересборка sandbox-образа
+        if _UPDATE_SANDBOX_RE.search(mail.body):
+            await self._handle_update_sandbox(mail)
             return
 
         # Команда оператора: самообучение
@@ -202,14 +214,44 @@ class Agent:
         )
         self._reply_result(mail, task.type.value, status, result, elapsed)
 
+    async def _handle_update_sandbox(self, mail: IncomingMail) -> None:
+        """Пересобирает Docker-образ apiat-sandbox из Dockerfile."""
+        dockerfile = Path(__file__).parent.parent / "docker" / "skill-sandbox.Dockerfile"
+        lines: list[str] = []
+
+        if not dockerfile.exists():
+            self._safe_send(OutgoingMail(
+                to=mail.sender,
+                subject="APIAt: обнови среду — ОШИБКА",
+                body=f"Dockerfile не найден: {dockerfile}",
+                in_reply_to=mail.message_id,
+            ))
+            return
+
+        lines.append(f"Dockerfile: {dockerfile.name}")
+        r = subprocess.run(
+            ["docker", "build", "-f", str(dockerfile), "-t", "apiat-sandbox:latest",
+             str(dockerfile.parent)],
+            capture_output=True, text=True, timeout=300,
+        )
+        out = (r.stdout + r.stderr).strip()
+        lines.append(f"docker build: {'OK' if r.returncode == 0 else 'ОШИБКА'}")
+        if out:
+            lines.append(out[-800:])
+
+        self._safe_send(OutgoingMail(
+            to=mail.sender,
+            subject=f"APIAt: sandbox-образ {'обновлён' if r.returncode == 0 else 'ОШИБКА'}",
+            body="\n".join(lines),
+            in_reply_to=mail.message_id,
+        ))
+
     async def _handle_update_command(self, mail: IncomingMail) -> None:
         """git pull + pip install + systemctl restart apiat.
 
         Выполняется только если письмо авторизовано (whitelist + токен).
         Перед обновлением делает snapshot текущего HEAD для отката.
         """
-        from pathlib import Path
-
         project_dir = Path(__file__).parent.parent
         lines: list[str] = []
 

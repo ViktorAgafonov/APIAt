@@ -38,8 +38,8 @@ _UPDATE_CMD_RE = re.compile(
 
 # Команда самообучения: "самообучись: <описание>"
 _LEARN_CMD_RE = re.compile(
-    r"^(самообучись|learn)\s*[:\-]?\s*(.+)",
-    re.IGNORECASE | re.MULTILINE,
+    r"(самообучись|learn)\s*[:\-]?\s*(.+)",
+    re.IGNORECASE,
 )
 
 # Подтверждение навыка: "подтверди навык <имя>"
@@ -68,8 +68,8 @@ _SAVE_CHAIN_RE = re.compile(
 
 # Построить цепочку через LLM: "цепочка: <задача>"
 _CHAIN_TASK_RE = re.compile(
-    r"^(цепочка|chain)\s*[:\-]?\s*(.+)",
-    re.IGNORECASE | re.MULTILINE,
+    r"(цепочка|chain)\s*[:\-]?\s*(.+)",
+    re.IGNORECASE,
 )
 
 
@@ -107,7 +107,9 @@ class Agent:
 
         self.storage.mark_mail_processed(mail.message_id, mail.sender)
 
-        logger.warning("Тело письма (repr): %r", mail.body[:300])
+        # Нормализуем неразрывные пробелы и другие unicode-пробелы → обычный пробел
+        body = mail.body.replace("\xa0", " ").replace("\u2009", " ").replace("\u200b", "")
+        mail = mail.model_copy(update={"body": body})
 
         # Команда оператора: обновить код с GitHub
         if _UPDATE_CMD_RE.search(mail.body):

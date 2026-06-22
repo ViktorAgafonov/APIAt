@@ -79,6 +79,20 @@ _CHAIN_TASK_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Управление whitelist
+_WL_ADD_RE = re.compile(
+    r"(добавь\s+в\s+whitelist|whitelist\s*add|добавь\s+доступ)\s*[:\-]?\s*(\S+@\S+)",
+    re.IGNORECASE,
+)
+_WL_REMOVE_RE = re.compile(
+    r"(убери\s+(из\s+)?whitelist|whitelist\s*remove|убери\s+доступ)\s*[:\-]?\s*(\S+@\S+)",
+    re.IGNORECASE,
+)
+_WL_LIST_RE = re.compile(
+    r"(покажи\s+whitelist|список\s+whitelist|whitelist\s*list|кто\s+имеет\s+доступ)",
+    re.IGNORECASE,
+)
+
 # Помощь
 _HELP_RE = re.compile(
     r"(помощь|инструкции|help|commands?)",
@@ -118,8 +132,8 @@ class Agent:
             logger.info("Письмо %s уже обработано, пропуск", mail.message_id)
             return
 
-        # Безопасность: whitelist + секретный токен
-        if not is_authorized(mail, self.settings.whitelist, self.settings.secret_token):
+        # Безопасность: whitelist (env + БД) + секретный токен
+        if not is_authorized(mail, self._effective_whitelist(), self.settings.secret_token):
             logger.warning("Письмо от %s отклонено (нет доступа/токена)", mail.sender)
             self.storage.mark_mail_processed(mail.message_id, mail.sender)
             return
@@ -181,6 +195,21 @@ class Agent:
         # Команда оператора: изменить настройки LLM
         if _LLM_CMD_RE.search(mail.body):
             await self._handle_llm_config_command(mail)
+            return
+
+        # Управление whitelist
+        wl_add_m = _WL_ADD_RE.search(mail.body)
+        if wl_add_m:
+            self._handle_whitelist_add(mail, wl_add_m.group(2).strip())
+            return
+
+        wl_rm_m = _WL_REMOVE_RE.search(mail.body)
+        if wl_rm_m:
+            self._handle_whitelist_remove(mail, wl_rm_m.group(3).strip())
+            return
+
+        if _WL_LIST_RE.search(mail.body):
+            self._handle_whitelist_list(mail)
             return
 
         # Команда: браузерная авторизация
@@ -556,6 +585,91 @@ class Agent:
             in_reply_to=mail.message_id,
         ))
 
+    def _effective_whitelist(self) -> list[str]:
+        """Объединяет whitelist из .env и динамические записи из БД, учитывает исключения."""
+        base = [a.lower() for a in self.settings.whitelist]
+        extra = self.storage.whitelist_get()
+        conn = self.storage._conn()
+        try:
+            rows = conn.execute(
+                "SELECT key FROM settings WHERE key LIKE 'wl_excluded:%'"
+            ).fetchall()
+            excluded_set = {r["key"][len("wl_excluded:"):] for r in rows}
+        finally:
+            conn.close()
+        seen: dict[str, None] = {}
+        for addr in base + extra:
+            if addr not in excluded_set:
+                seen[addr] = None
+        return list(seen)
+
+    def _handle_whitelist_add(self, mail: IncomingMail, email: str) -> None:
+        from .gateway.security import extract_address
+        addr = extract_address(email) or email.strip().lower()
+        if not addr or "@" not in addr:
+            self._safe_send(OutgoingMail(
+                to=mail.sender,
+                subject="APIAt: whitelist — ОШИБКА",
+                body=f"Некорректный адрес: {email!r}",
+                in_reply_to=mail.message_id,
+            ))
+            return
+        self.storage.whitelist_add(addr)
+        wl = self._effective_whitelist()
+        self._safe_send(OutgoingMail(
+            to=mail.sender,
+            subject="APIAt: whitelist обновлён",
+            body=f"Добавлен: {addr}\n\nТекущий whitelist:\n" + "\n".join(f"  • {a}" for a in sorted(wl)),
+            in_reply_to=mail.message_id,
+        ))
+
+    def _handle_whitelist_remove(self, mail: IncomingMail, email: str) -> None:
+        from .gateway.security import extract_address
+        addr = extract_address(email) or email.strip().lower()
+        sender_addr = extract_address(mail.sender)
+        wl = self._effective_whitelist()
+
+        if addr not in wl:
+            self._safe_send(OutgoingMail(
+                to=mail.sender,
+                subject="APIAt: whitelist — адрес не найден",
+                body=f"{addr!r} не в whitelist.\n\nТекущий whitelist:\n" + "\n".join(f"  • {a}" for a in sorted(wl)),
+                in_reply_to=mail.message_id,
+            ))
+            return
+
+        # Защита: нельзя удалить свой адрес если он последний
+        remaining = [a for a in wl if a != addr]
+        if addr == sender_addr and not remaining:
+            self._safe_send(OutgoingMail(
+                to=mail.sender,
+                subject="APIAt: whitelist — ЗАПРЕЩЕНО",
+                body=f"Нельзя удалить {addr!r} — это последний адрес в whitelist и он ваш.\nДобавьте другой адрес перед удалением.",
+                in_reply_to=mail.message_id,
+            ))
+            return
+
+        self.storage.whitelist_remove(addr)
+        # Удаляем также из .env-части через БД-пометку (если был в .env — запишем исключение)
+        self.storage.set_setting(f"wl_excluded:{addr}", "1")
+        wl_new = self._effective_whitelist()
+        self._safe_send(OutgoingMail(
+            to=mail.sender,
+            subject="APIAt: whitelist обновлён",
+            body=f"Удалён: {addr}\n\nТекущий whitelist:\n" + "\n".join(f"  • {a}" for a in sorted(wl_new)),
+            in_reply_to=mail.message_id,
+        ))
+
+    def _handle_whitelist_list(self, mail: IncomingMail) -> None:
+        wl = self._effective_whitelist()
+        body = "Текущий whitelist:\n" + "\n".join(f"  • {a}" for a in sorted(wl)) if wl else "Whitelist пуст."
+        self._safe_send(OutgoingMail(
+            to=mail.sender,
+            subject="APIAt: whitelist",
+            body=body,
+            in_reply_to=mail.message_id,
+        ))
+
     def _handle_help(self, mail: IncomingMail) -> None:
         """Отправляет список всех команд и навыков."""
         skills = self.skill_builder.list_skills()
@@ -586,6 +700,12 @@ class Agent:
             "  цепочка: <задача>                — LLM строит план из навыков",
             "  сохрани цепочку <имя>            — сохранить последнюю цепочку",
             "  выполни цепочку <имя>: key=val  — запустить сохранённую цепочку",
+            "",
+            "## Управление доступом (whitelist)",
+            "  покажи whitelist                     — список разрешённых адресов",
+            "  добавь в whitelist user@example.com  — добавить адрес",
+            "  убери из whitelist user@example.com  — удалить адрес",
+            "    (нельзя удалить свой адрес если он последний)",
             "",
             "## Браузерная авторизация",
             "  авторизуйся: url=https://... логин=user пароль=pass",

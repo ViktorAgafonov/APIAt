@@ -145,6 +145,38 @@ class Storage:
         finally:
             conn.close()
 
+    # --- динамический whitelist (overrides поверх .env) ---
+    def whitelist_get(self) -> list[str]:
+        """Возвращает список адресов из динамического whitelist (БД)."""
+        conn = self._conn()
+        try:
+            rows = conn.execute("SELECT key FROM settings WHERE key LIKE 'wl:%'").fetchall()
+            return [r["key"][3:] for r in rows]
+        finally:
+            conn.close()
+
+    def whitelist_add(self, email: str) -> None:
+        conn = self._conn()
+        try:
+            conn.execute(
+                "INSERT OR IGNORE INTO settings (key, value) VALUES (?, '1')",
+                (f"wl:{email.strip().lower()}",),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def whitelist_remove(self, email: str) -> None:
+        conn = self._conn()
+        try:
+            conn.execute(
+                "DELETE FROM settings WHERE key = ?",
+                (f"wl:{email.strip().lower()}",),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
     # --- браузерные сессии ---
     def save_browser_session(self, domain: str, storage_state: dict) -> None:
         conn = self._conn()

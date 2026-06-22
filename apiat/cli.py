@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import random
 import subprocess
 import time
 from pathlib import Path
@@ -46,13 +47,14 @@ async def _run_once(agent: Agent) -> None:
 
 
 async def _run_daemon(agent: Agent, interval: int) -> None:
-    logger.info("Запуск демона, интервал опроса: %d сек", interval)
+    logger.info("Запуск демона, базовый интервал: %d сек", interval)
     while True:
         try:
             await agent.run_once()
         except Exception:  # noqa: BLE001 - демон не должен падать на одной итерации
             logger.exception("Ошибка итерации демона")
-        time.sleep(interval)
+        jitter = random.randint(-9, 9)
+        time.sleep(interval + jitter)
 
 
 def main(argv: list[str] | None = None) -> int:

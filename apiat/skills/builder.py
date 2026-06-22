@@ -19,10 +19,10 @@ logger = get_logger(__name__)
 _ENV_CONTEXT_BASE = """
 Среда выполнения:
 - Python 3.12, Linux (Ubuntu 24.04), VPS сервер
-- Доступные модули: stdlib + psutil + requests (все установлены)
+- Доступные модули: stdlib + psutil + requests + selectolax (все установлены)
 - Результат должен быть напечатан через print() в stdout
 - Ответ пользователю — plain text, удобно читаемый: разделы через пустую строку, выравнивание через пробелы, значения через :
-- Код должен быть полностью самодостаточным, в одном файле, без внешних import кроме stdlib/psutil/requests
+- Код должен быть полностью самодостаточным, в одном файле, без внешних import кроме stdlib/psutil/requests/selectolax
 - Первые строки кода — метаданные лимитов sandbox (# skill:key=value):
     # skill:profile=isolated|network|storage
     # skill:memory=128m      (лимит RAM)

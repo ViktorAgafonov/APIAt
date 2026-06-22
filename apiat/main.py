@@ -47,6 +47,12 @@ _CONFIRM_SKILL_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Список навыков
+_LIST_SKILLS_RE = re.compile(
+    r"(список\s*навыков|list\s*skills?|show\s*skills?)",
+    re.IGNORECASE,
+)
+
 
 class Agent:
     """Сборка компонентов APIAt и обработка входящих писем."""
@@ -92,6 +98,11 @@ class Agent:
         confirm_match = _CONFIRM_SKILL_RE.search(mail.body)
         if confirm_match:
             await self._handle_confirm_skill(mail, confirm_match.group(2).strip())
+            return
+
+        # Команда оператора: список навыков
+        if _LIST_SKILLS_RE.search(mail.body):
+            self._handle_list_skills(mail)
             return
 
         # Команда оператора: изменить настройки LLM
@@ -241,6 +252,16 @@ class Agent:
             to=mail.sender,
             subject=f"APIAt: навык '{result.skill_name}' ожидает подтверждения",
             body=body,
+            in_reply_to=mail.message_id,
+        ))
+
+    def _handle_list_skills(self, mail: IncomingMail) -> None:
+        """Отправляет оператору список закреплённых и pending навыков."""
+        report = self.skill_builder.skills_report()
+        self._safe_send(OutgoingMail(
+            to=mail.sender,
+            subject="APIAt: список навыков",
+            body=report,
             in_reply_to=mail.message_id,
         ))
 

@@ -164,7 +164,39 @@ class SkillBuilder:
         return True
 
     def list_pending(self) -> list[str]:
-        return [p.stem for p in self._pending_dir.glob("*.py")]
+        return sorted(p.stem for p in self._pending_dir.glob("*.py"))
+
+    def list_confirmed(self) -> list[str]:
+        return sorted(p.stem for p in self._skills_dir.glob("*.py"))
+
+    def skills_report(self) -> str:
+        """Текстовый отчёт о навыках для отправки оператору."""
+        confirmed = self.list_confirmed()
+        pending = self.list_pending()
+        lines: list[str] = []
+
+        if confirmed:
+            lines.append(f"✓ Закреплённые навыки ({len(confirmed)}):")
+            for name in confirmed:
+                lines.append(f"  • {name}")
+        else:
+            lines.append("✓ Закреплённые навыки: нет")
+
+        lines.append("")
+
+        if pending:
+            lines.append(f"⏳ Ожидают подтверждения ({len(pending)}):")
+            for name in pending:
+                lines.append(f"  • {name}")
+                lines.append(f"    → чтобы закрепить: подтверди навык {name}")
+        else:
+            lines.append("⏳ Ожидают подтверждения: нет")
+
+        lines.append("")
+        lines.append("Чтобы создать новый навык:")
+        lines.append("  самообучись: <описание навыка>")
+
+        return "\n".join(lines)
 
     async def _generate_code(self, user_prompt: str) -> str:
         prompt = _GENERATE_PROMPT.format(

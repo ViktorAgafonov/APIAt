@@ -109,7 +109,18 @@ class Settings(BaseSettings):
 
     def ensure_dirs(self) -> None:
         """Создаёт каталоги данных при необходимости."""
-        self.data_dir.mkdir(parents=True, exist_ok=True)
+        for sub in [
+            self.data_dir,
+            self.data_dir / "downloads" / "pending",
+            self.data_dir / "downloads" / "done",
+            self.data_dir / "downloads" / "failed",
+            self.data_dir / "browser" / "sessions",
+            self.data_dir / "browser" / "screenshots",
+            self.data_dir / "browser" / "cookies",
+            self.data_dir / "archive" / "parts",
+            self.data_dir / "tmp",
+        ]:
+            sub.mkdir(parents=True, exist_ok=True)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
 
 

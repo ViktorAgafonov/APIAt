@@ -8,6 +8,7 @@ import time
 
 from .config import get_settings
 from .main import Agent
+from .utils.cache import cleanup_stale
 from .utils.logging import get_logger, setup_logging
 
 logger = get_logger(__name__)
@@ -36,6 +37,8 @@ def main(argv: list[str] | None = None) -> int:
 
     settings = get_settings()
     setup_logging(settings.log_level)
+    settings.ensure_dirs()
+    cleanup_stale(settings.data_dir)
     agent = Agent(settings)
 
     if args.once:

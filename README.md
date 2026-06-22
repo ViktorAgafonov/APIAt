@@ -92,6 +92,9 @@ cd /opt/apiat && git pull origin main && systemctl restart apiat
 | `обнови код` / `update code` | `git pull` + `pip install` + перезапуск сервиса; при ошибке — автооткат |
 | `самообучись: <описание>` / `learn: <описание>` | Сгенерировать навык через LLM → ревью → Docker sandbox → валидация → ожидание подтверждения |
 | `список навыков` / `list skills` | Показать закреплённые навыки и ожидающие подтверждения с готовыми командами |
+| `цепочка: <задача>` / `chain: <задача>` | LLM строит план из закреплённых навыков и выполняет цепочку |
+| `сохрани цепочку <имя>` / `save chain <имя>` | Закрепить выполненную цепочку как `.chain.json` |
+| `выполни цепочку <имя>: key=val` / `run chain <имя>: key=val` | Запустить сохранённую цепочку с параметрами |
 | `подтверди навык <имя>` / `confirm skill <имя>` | Переместить навык из `pending/` в `skills/` |
 | `переключи llm` | Показать статус LLM-провайдеров и diff с резервной копией `.env` |
 | `переключи llm` + строки `KEY=value` | Применить новые LLM-параметры, проверить пробным запросом; при ошибке — откат |
@@ -108,6 +111,39 @@ cd /opt/apiat && git pull origin main && systemctl restart apiat
 
 подтверди навык <имя>
   → data/skills/pending/<имя>.py → data/skills/<имя>.py
+```
+
+### Цепочки навыков
+
+```
+цепочка: скачай файл по url, разбей по 10MB, упакуй zip, пришли
+  → LLM анализирует задачу + список закреплённых навыков
+  → Строит план: [download_file, split_file, pack_archive]
+  → Выполняет последовательно, шаги обмениваются файлами через /data
+  → Отчёт с планом + предложение сохранить
+
+сохрани цепочку download_pack_send
+  → data/skills/chains/download_pack_send.chain.json
+
+выполни цепочку download_pack_send: url=https://... email=user@example.com
+  → Запуск без LLM по сохранённому плану
+```
+
+**Передача данных между шагами** — общая рабочая директория `/data` (tmp/<run_id>/).
+Каждый навык в цепочке работает с `profile=storage`, монтируется автоматически.
+Stdout шага доступен следующему в params как `{prev_skill.output}`.
+
+**Формат `.chain.json`:**
+```json
+{
+  "name": "download_pack_send",
+  "description": "Скачать, разбить, упаковать, отправить",
+  "steps": [
+    {"skill": "download_file", "params": {"url": "{input.url}"}},
+    {"skill": "split_file",    "params": {"max_mb": "10"}},
+    {"skill": "pack_archive",  "params": {}}
+  ]
+}
 ```
 
 ### Ручное написание модулей навыков

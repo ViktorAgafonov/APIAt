@@ -15,6 +15,7 @@ from .intent.self_corrector import SelfCorrector, try_apply_and_verify
 from .models.base import TaskStatus
 from .models.email import IncomingMail, OutgoingMail
 from .skills.builder import SkillBuilder
+from .skills.chain import ChainPlanner, ChainRunner, SkillChain
 from .storage.repositories import Storage
 from .tools.email_tool import EmailSender
 from .tools.registry import ToolRegistry
@@ -53,6 +54,24 @@ _LIST_SKILLS_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Запуск цепочки: "выполни цепочку <имя>: key=val key2=val2"
+_RUN_CHAIN_RE = re.compile(
+    r"(выполни\s*цепочку|run\s*chain)\s*[:\-]?\s*(\S+)([^\n]*)",
+    re.IGNORECASE,
+)
+
+# Сохранить цепочку: "сохрани цепочку <имя>"
+_SAVE_CHAIN_RE = re.compile(
+    r"(сохрани\s*цепочку|save\s*chain)\s*[:\-]?\s*(\S+)",
+    re.IGNORECASE,
+)
+
+# Построить цепочку через LLM: "цепочка: <задача>"
+_CHAIN_TASK_RE = re.compile(
+    r"^(цепочка|chain)\s*[:\-]?\s*(.+)",
+    re.IGNORECASE | re.DOTALL,
+)
+
 
 class Agent:
     """Сборка компонентов APIAt и обработка входящих писем."""
@@ -67,6 +86,11 @@ class Agent:
         self.engine = WorkflowEngine(self.registry, self.settings.db_path)
         self.sender = EmailSender(self.settings)
         self.skill_builder = SkillBuilder(self.settings, self.settings.data_dir / "skills")
+        self.chain_runner = ChainRunner(self.settings.data_dir / "skills", self.settings.data_dir)
+        self.chain_planner = ChainPlanner(
+            self.skill_builder._router, self.settings.data_dir / "skills"
+        )
+        self._pending_chains: dict[str, SkillChain] = {}  # run_id -> chain (ожидают сохранения)
 
     async def process_mail(self, mail: IncomingMail) -> None:
         """Полный цикл обработки одного письма."""
@@ -103,6 +127,26 @@ class Agent:
         # Команда оператора: список навыков
         if _LIST_SKILLS_RE.search(mail.body):
             self._handle_list_skills(mail)
+            return
+
+        # Команда: запустить цепочку по имени
+        run_chain_m = _RUN_CHAIN_RE.search(mail.body)
+        if run_chain_m:
+            name = run_chain_m.group(2).strip()
+            params_str = run_chain_m.group(3).strip()
+            await self._handle_run_chain(mail, name, _parse_inline_params(params_str))
+            return
+
+        # Команда: сохранить последнюю построенную цепочку
+        save_chain_m = _SAVE_CHAIN_RE.search(mail.body)
+        if save_chain_m:
+            await self._handle_save_chain(mail, save_chain_m.group(2).strip())
+            return
+
+        # Команда: построить цепочку через LLM
+        chain_task_m = _CHAIN_TASK_RE.search(mail.body)
+        if chain_task_m:
+            await self._handle_chain_task(mail, chain_task_m.group(2).strip())
             return
 
         # Команда оператора: изменить настройки LLM
@@ -255,6 +299,103 @@ class Agent:
             in_reply_to=mail.message_id,
         ))
 
+    async def _handle_chain_task(self, mail: IncomingMail, task: str) -> None:
+        """LLM строит план цепочки из доступных навыков и выполняет её."""
+        logger.info("Построение цепочки: %s", task[:80])
+        params = _parse_inline_params(task)
+        chain = await self.chain_planner.plan(task, params)
+        if not chain or not chain.steps:
+            self._safe_send(OutgoingMail(
+                to=mail.sender,
+                subject="APIAt: не удалось построить цепочку",
+                body=(
+                    "Не найдено подходящих навыков для задачи.\n"
+                    f"Доступные навыки: {', '.join(self.skill_builder.list_confirmed()) or 'нет'}"
+                ),
+                in_reply_to=mail.message_id,
+            ))
+            return
+
+        run_result = self.chain_runner.run(chain, params)
+        report = run_result.report()
+
+        # Храним цепочку для возможного сохранения
+        self._pending_chains[chain.name] = chain
+
+        steps_desc = "\n".join(
+            f"  {i+1}. {s.skill}: {s.description}" for i, s in enumerate(chain.steps)
+        )
+        body = (
+            f"Цепочка выполнена ({'OK' if run_result.success else 'ОШИБКА'}).\n\n"
+            f"План шагов:\n{steps_desc}\n\n"
+            f"Результат:\n{report}\n\n"
+            f"Если цепочка работает правильно, ответьте чтобы закрепить её:\n"
+            f"сохрани цепочку {chain.name}"
+        )
+        self._safe_send(OutgoingMail(
+            to=mail.sender,
+            subject=f"APIAt: цепочка '{chain.name}'",
+            body=body,
+            in_reply_to=mail.message_id,
+        ))
+
+    async def _handle_run_chain(self, mail: IncomingMail, name: str, params: dict) -> None:
+        """Runs a saved .chain.json by name."""
+        chain = self.chain_runner.load_chain(name)
+        if not chain:
+            chains = self.chain_runner.list_chains()
+            self._safe_send(OutgoingMail(
+                to=mail.sender,
+                subject=f"APIAt: цепочка '{name}' не найдена",
+                body=f"Доступные цепочки: {', '.join(chains) or 'нет'}",
+                in_reply_to=mail.message_id,
+            ))
+            return
+        run_result = self.chain_runner.run(chain, params)
+        self._safe_send(OutgoingMail(
+            to=mail.sender,
+            subject=f"APIAt: цепочка '{name}' {'OK' if run_result.success else 'ОШИБКА'}",
+            body=run_result.report(),
+            in_reply_to=mail.message_id,
+        ))
+
+    async def _handle_save_chain(self, mail: IncomingMail, name: str) -> None:
+        """Saves pending chain by name to chains/ directory."""
+        chain = self._pending_chains.get(name)
+        if not chain:
+            # Попытка найти по частичному совпадению
+            for key in self._pending_chains:
+                if name in key:
+                    chain = self._pending_chains[key]
+                    break
+        if not chain:
+            self._safe_send(OutgoingMail(
+                to=mail.sender,
+                subject="APIAt: цепочка не найдена",
+                body=(
+                    f"Цепочка '{name}' не найдена в очереди.\n"
+                    "Сначала выполните: цепочка: <задача>"
+                ),
+                in_reply_to=mail.message_id,
+            ))
+            return
+        chain.name = name
+        path = self.chain_runner.save_chain(chain)
+        del self._pending_chains[list(self._pending_chains.keys())[
+            list(self._pending_chains.values()).index(chain)
+        ]]
+        steps_desc = "\n".join(f"  {i+1}. {s.skill}" for i, s in enumerate(chain.steps))
+        self._safe_send(OutgoingMail(
+            to=mail.sender,
+            subject=f"APIAt: цепочка '{name}' сохранена",
+            body=(
+                f"Цепочка '{name}' сохранена в {path.name}\n\n"
+                f"Шаги:\n{steps_desc}\n\n"
+                f"Запуск: выполни цепочку {name}: url=..."
+            ),
+            in_reply_to=mail.message_id,
+        ))
+
     def _handle_list_skills(self, mail: IncomingMail) -> None:
         """Отправляет оператору список закреплённых и pending навыков."""
         report = self.skill_builder.skills_report()
@@ -380,6 +521,14 @@ class Agent:
         for mail in mails:
             await self.process_mail(mail)
         return len(mails)
+
+
+def _parse_inline_params(text: str) -> dict[str, str]:
+    """Извлекает параметры вида key=value из строки."""
+    result: dict[str, str] = {}
+    for m in re.finditer(r"(\w+)=(\S+)", text):
+        result[m.group(1)] = m.group(2)
+    return result
 
 
 def _parse_env_updates(body: str) -> dict[str, str]:

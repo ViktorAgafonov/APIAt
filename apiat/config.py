@@ -121,6 +121,7 @@ class Settings(BaseSettings):
             self.data_dir / "tmp",
             self.data_dir / "skills",
             self.data_dir / "skills" / "pending",
+            self.data_dir / "skills" / "chains",
         ]:
             sub.mkdir(parents=True, exist_ok=True)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)

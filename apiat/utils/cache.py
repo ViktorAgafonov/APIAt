@@ -18,19 +18,20 @@ _SHM_FILL_THRESHOLD = 0.80  # fallback на диск если shm занято >
 def get_temp_dir(task_id: str, data_dir: Path) -> Path:
     """Возвращает временную директорию для задачи.
 
-    Предпочитает /dev/shm (RAM), при заполнении > 80% — data/tmp/.
+    На Linux предпочитает /dev/shm (RAM), при заполнении > 80% — data/tmp/.
+    На Windows всегда использует data/tmp/.
     Директория создаётся автоматически.
     """
     shm_dir = _SHM_ROOT / task_id
-    try:
-        stat = os.statvfs(str(_SHM_ROOT.parent))
-        used_ratio = 1.0 - stat.f_bavail / stat.f_blocks if stat.f_blocks else 1.0
-    except (OSError, ZeroDivisionError):
-        used_ratio = 1.0
-
-    if used_ratio < _SHM_FILL_THRESHOLD:
-        shm_dir.mkdir(parents=True, exist_ok=True)
-        return shm_dir
+    if _SHM_ROOT.parent.exists() and hasattr(os, "statvfs"):
+        try:
+            stat = os.statvfs(str(_SHM_ROOT.parent))
+            used_ratio = 1.0 - stat.f_bavail / stat.f_blocks if stat.f_blocks else 1.0
+        except (OSError, ZeroDivisionError):
+            used_ratio = 1.0
+        if used_ratio < _SHM_FILL_THRESHOLD:
+            shm_dir.mkdir(parents=True, exist_ok=True)
+            return shm_dir
 
     fallback = data_dir / "tmp" / task_id
     fallback.mkdir(parents=True, exist_ok=True)

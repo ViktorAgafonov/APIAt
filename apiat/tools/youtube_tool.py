@@ -37,6 +37,14 @@ class YoutubeTool(Tool):
         if not url:
             return ToolResult(success=False, error="URL не задан и канал не найден")
 
+        # Эвристика: если url похож на название канала а не на ссылку — ищем через channel_search
+        if url and not url.startswith("http") and not url.startswith("ytsearch"):
+            channel_hint = url.lstrip("@").strip()
+            try:
+                url = self._find_latest_from_channel(channel_hint)
+            except Exception as exc:  # noqa: BLE001
+                return ToolResult(success=False, error=f"Канал '{channel_hint}' не найден: {exc}")
+
         try:
             if meta_only:
                 return self._get_metadata(url, want_thumb)
@@ -65,8 +73,10 @@ class YoutubeTool(Tool):
             attachments.append(Attachment(filename=tp.name, path=str(tp), size=tp.stat().st_size, content_type=ct))
 
         summary = f"Скачано: {title} ({fmt})"
-        if sub_paths:
+        if want_subs and sub_paths:
             summary += f", субтитры: {len(sub_paths)} файл(ов)"
+        elif want_subs and not sub_paths:
+            summary += "\nСубтитры недоступны (YouTube ограничил запросы с этого IP). Попробуйте позже или запросите субтитры отдельно."
         if thumb_path:
             summary += ", обложка приложена"
         return ToolResult(
@@ -77,27 +87,36 @@ class YoutubeTool(Tool):
         )
 
     def _find_latest_from_channel(self, channel_name: str) -> str:
-        """Ищет последнее видео канала по имени через ytsearch."""
+        """Ищет последнее видео канала по имени."""
         import yt_dlp  # ленивый импорт
 
-        # Пробуем прямой handle @channel_name, потом поиск
-        for probe_url in (
-            f"https://www.youtube.com/@{channel_name}/videos",
-            f"https://www.youtube.com/c/{channel_name}/videos",
-            f"ytsearch1:{channel_name}",
-        ):
+        # Нормализуем: убираем пробелы → транслитерация не нужна, YouTube ищет по unicode
+        name_clean = channel_name.strip()
+        # Сначала пробуем handle (без пробелов), потом полное имя через поиск
+        handle = name_clean.replace(" ", "_")
+        probe_urls = [
+            f"ytsearch1:{name_clean} канал",   # самый надёжный — через YouTube Search
+            f"ytsearch1:{name_clean}",
+            f"https://www.youtube.com/@{handle}/videos",
+            f"https://www.youtube.com/c/{handle}/videos",
+        ]
+        opts = {"quiet": True, "extract_flat": True, "playlist_items": "1"}
+        for probe_url in probe_urls:
             try:
-                opts = {"quiet": True, "extract_flat": True, "playlist_items": "1"}
                 with yt_dlp.YoutubeDL(opts) as ydl:
                     info = ydl.extract_info(probe_url, download=False)
                 entries = info.get("entries") or []
+                if not entries and info.get("id"):
+                    # Одиночное видео из поиска
+                    return f"https://www.youtube.com/watch?v={info['id']}"
                 if entries:
-                    vid_id = entries[0].get("id") or entries[0].get("url", "")
-                    if vid_id:
+                    first = entries[0]
+                    vid_id = first.get("id") or ""
+                    if vid_id and len(vid_id) == 11:  # YouTube video ID всегда 11 символов
                         return f"https://www.youtube.com/watch?v={vid_id}"
             except Exception:  # noqa: BLE001
                 continue
-        raise ValueError(f"Канал '{channel_name}' не найден. Укажите точный URL.")
+        raise ValueError(f"Канал '{channel_name}' не найден. Укажите точный URL канала.")
 
     def _get_metadata(self, url: str, want_thumb: bool = False) -> ToolResult:
         import yt_dlp  # ленивый импорт
@@ -127,13 +146,24 @@ class YoutubeTool(Tool):
                     break
         return ToolResult(success=True, summary="\n".join(lines), data=info, attachments=attachments)
 
+    @staticmethod
+    def _base_opts(outtmpl: str) -> dict:
+        return {
+            "outtmpl": outtmpl,
+            "quiet": True,
+            "noprogress": True,
+            "sleep_interval": 2,       # пауза между запросами — снижает 429
+            "max_sleep_interval": 5,
+            "ignoreerrors": False,
+        }
+
     def _download(
         self, url: str, fmt: str, max_quality: int | None, want_subs: bool, want_thumb: bool
     ) -> tuple[str, str, list[str], str | None]:
         import yt_dlp  # ленивый импорт
 
         outtmpl = str(self._dir / "%(title)s.%(ext)s")
-        opts: dict = {"outtmpl": outtmpl, "quiet": True, "noprogress": True}
+        opts = self._base_opts(outtmpl)
 
         if fmt == "mp3":
             opts["format"] = "bestaudio/best"
@@ -142,15 +172,10 @@ class YoutubeTool(Tool):
             height = f"[height<={max_quality}]" if max_quality else ""
             opts["format"] = f"bestvideo{height}+bestaudio/best{height}"
 
-        if want_subs:
-            opts["writesubtitles"] = True
-            opts["writeautomaticsub"] = True
-            opts["subtitleslangs"] = ["ru", "en"]
-            opts["subtitlesformat"] = "srt"
-
         if want_thumb:
             opts["writethumbnail"] = True
 
+        # Шаг 1: скачиваем видео (без субтитров — они могут дать 429)
         with yt_dlp.YoutubeDL(opts) as ydl:
             info = ydl.extract_info(url, download=True)
             path = ydl.prepare_filename(info)
@@ -158,13 +183,10 @@ class YoutubeTool(Tool):
                 path = str(Path(path).with_suffix(".mp3"))
             title = info.get("title", "video")
 
+        # Шаг 2: субтитры отдельным проходом, чтобы ошибка не убила весь результат
         sub_paths: list[str] = []
         if want_subs:
-            base = Path(path).with_suffix("")
-            for candidate in base.parent.glob(f"{base.name}*.srt"):
-                sub_paths.append(str(candidate))
-            for candidate in base.parent.glob(f"{base.name}*.vtt"):
-                sub_paths.append(str(candidate))
+            sub_paths = self._download_subs(url, outtmpl, title)
 
         thumb_path: str | None = None
         if want_thumb:
@@ -176,3 +198,29 @@ class YoutubeTool(Tool):
                     break
 
         return path, title, sub_paths, thumb_path
+
+    def _download_subs(self, url: str, outtmpl: str, title: str) -> list[str]:
+        """Скачивает субтитры отдельно; при 429/ошибке возвращает пустой список."""
+        import yt_dlp  # ленивый импорт
+
+        opts = self._base_opts(outtmpl)
+        opts["skip_download"] = True
+        opts["writesubtitles"] = True
+        opts["writeautomaticsub"] = True
+        opts["subtitleslangs"] = ["ru", "en"]
+        opts["subtitlesformat"] = "srt"
+
+        try:
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                ydl.extract_info(url, download=True)
+        except Exception:  # noqa: BLE001 — 429/network, видео уже скачано
+            logger.warning("Субтитры недоступны (возможно rate-limit), пропускаем")
+            return []
+
+        sub_paths: list[str] = []
+        base_dir = Path(outtmpl).parent
+        for candidate in base_dir.glob(f"*{title[:40]}*.srt"):
+            sub_paths.append(str(candidate))
+        for candidate in base_dir.glob(f"*{title[:40]}*.vtt"):
+            sub_paths.append(str(candidate))
+        return sub_paths

@@ -79,6 +79,18 @@ _CHAIN_TASK_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Помощь
+_HELP_RE = re.compile(
+    r"(помощь|инструкции|help|commands?)",
+    re.IGNORECASE,
+)
+
+# Браузерная авторизация: "авторизуйся: url=... логин=... пароль=..."
+_BROWSER_AUTH_RE = re.compile(
+    r"(авторизуйся|войди|browser\s*auth|login)\s*[:\-]?\s*(.+)",
+    re.IGNORECASE | re.DOTALL,
+)
+
 
 class Agent:
     """Сборка компонентов APIAt и обработка входящих писем."""
@@ -169,6 +181,17 @@ class Agent:
         # Команда оператора: изменить настройки LLM
         if _LLM_CMD_RE.search(mail.body):
             await self._handle_llm_config_command(mail)
+            return
+
+        # Команда: браузерная авторизация
+        auth_m = _BROWSER_AUTH_RE.search(mail.body)
+        if auth_m:
+            await self._handle_browser_auth(mail, auth_m.group(2).strip())
+            return
+
+        # Помощь
+        if _HELP_RE.search(mail.body):
+            self._handle_help(mail)
             return
 
         started = time.monotonic()
@@ -533,6 +556,145 @@ class Agent:
             in_reply_to=mail.message_id,
         ))
 
+    def _handle_help(self, mail: IncomingMail) -> None:
+        """Отправляет список всех команд и навыков."""
+        skills = self.skill_builder.list_skills()
+        pending = self.skill_builder.list_pending()
+
+        lines = [
+            "=== APIAt — справка ===",
+            "",
+            "## Задачи (свободный текст)",
+            "  поиск       — найди информацию / пришли новости [rss]",
+            "  скачай      — загрузить файл по URL",
+            "  youtube     — скачать видео/аудио (mp3/mp4), субтитры, метаданные",
+            "  браузер     — открыть страницу, извлечь текст",
+            "  файл/архив  — упаковать вложения в zip",
+            "",
+            "## Команды оператора",
+            "  обнови код             — git pull + перезапуск сервиса",
+            "  обнови среду           — пересборка Docker sandbox-образа",
+            "  переключи llm          — статус LLM-провайдеров",
+            "  переключи llm + KEY=.. — сменить параметры LLM",
+            "",
+            "## Самообучение",
+            "  самообучись: <описание>          — создать новый навык через LLM",
+            "  закрепи навык <имя>              — перенести из pending в skills",
+            "  список навыков                   — показать все навыки",
+            "",
+            "## Цепочки навыков",
+            "  цепочка: <задача>                — LLM строит план из навыков",
+            "  сохрани цепочку <имя>            — сохранить последнюю цепочку",
+            "  выполни цепочку <имя>: key=val  — запустить сохранённую цепочку",
+            "",
+            "## Браузерная авторизация",
+            "  авторизуйся: url=https://... логин=user пароль=pass",
+            "    — войти на сайт через Chromium, сессия сохраняется",
+            "    — после авторизации браузерные задачи на этом домене",
+            "      используют сохранённую сессию автоматически",
+            "",
+            "## Помощь",
+            "  помощь / инструкции / help       — эта справка",
+        ]
+
+        if skills:
+            lines += ["", "## Закреплённые навыки"]
+            for s in skills:
+                lines.append(f"  • {s}")
+        if pending:
+            lines += ["", "## Ожидают подтверждения"]
+            for s in pending:
+                lines.append(f"  • {s}  →  закрепи навык {s}")
+
+        self._safe_send(OutgoingMail(
+            to=mail.sender,
+            subject="APIAt: справка по командам",
+            body="\n".join(lines),
+            in_reply_to=mail.message_id,
+        ))
+
+    async def _handle_browser_auth(self, mail: IncomingMail, params_str: str) -> None:
+        """Авторизация на сайте через Playwright. Сессия сохраняется в SQLite.
+
+        Формат команды:
+            авторизуйся: url=https://example.com логин=user пароль=pass
+            авторизуйся: url=https://example.com логин=user пароль=pass селектор_логина=#email селектор_пароля=#password кнопка=button[type=submit]
+        """
+        params = _parse_inline_params(params_str)
+        url = params.get("url")
+        login = params.get("логин") or params.get("login") or params.get("user")
+        password = params.get("пароль") or params.get("password") or params.get("pass")
+
+        if not url:
+            self._safe_send(OutgoingMail(
+                to=mail.sender,
+                subject="APIAt: авторизация — ОШИБКА",
+                body="Укажите url=... в команде.\nПример:\n  авторизуйся: url=https://example.com логин=user пароль=pass",
+                in_reply_to=mail.message_id,
+            ))
+            return
+
+        sel_login = params.get("селектор_логина") or params.get("login_selector") or "input[type=email], input[type=text], input[name*=login], input[name*=user], input[name*=email]"
+        sel_pass = params.get("селектор_пароля") or params.get("pass_selector") or "input[type=password]"
+        sel_btn = params.get("кнопка") or params.get("button") or "button[type=submit], input[type=submit]"
+
+        try:
+            result_msg = await self._do_browser_auth(url, login, password, sel_login, sel_pass, sel_btn)
+        except Exception as exc:  # noqa: BLE001
+            result_msg = f"Ошибка: {exc}"
+
+        self._safe_send(OutgoingMail(
+            to=mail.sender,
+            subject="APIAt: браузерная авторизация",
+            body=result_msg,
+            in_reply_to=mail.message_id,
+        ))
+
+    async def _do_browser_auth(
+        self, url: str, login: str | None, password: str | None,
+        sel_login: str, sel_pass: str, sel_btn: str,
+    ) -> str:
+        from urllib.parse import urlparse
+        from playwright.async_api import async_playwright
+
+        domain = urlparse(url).netloc
+        saved_state = self.storage.load_browser_session(domain)
+
+        async with async_playwright() as pw:
+            browser = await pw.chromium.launch(headless=True)
+            try:
+                ctx_opts = {"storage_state": saved_state} if saved_state else {}
+                context = await browser.new_context(**ctx_opts)
+                page = await context.new_page()
+                await page.goto(url, wait_until="domcontentloaded", timeout=30_000)
+
+                lines = [f"Открыта страница: {url}"]
+
+                if login and password:
+                    try:
+                        await page.locator(sel_login).first.fill(login, timeout=5_000)
+                        await page.locator(sel_pass).first.fill(password, timeout=5_000)
+                        await page.locator(sel_btn).first.click(timeout=5_000)
+                        await page.wait_for_load_state("domcontentloaded", timeout=15_000)
+                        lines.append("Форма отправлена")
+                    except Exception as e:  # noqa: BLE001
+                        lines.append(f"Не удалось заполнить форму: {e}")
+                else:
+                    lines.append("Логин/пароль не указаны — сессия открыта без авторизации")
+
+                title = await page.title()
+                lines.append(f"Заголовок страницы: {title}")
+
+                state = await context.storage_state()
+                self.storage.save_browser_session(domain, state)
+                if state.get("cookies"):
+                    self.storage.save_cookies(domain, state["cookies"])
+                lines.append(f"Сессия сохранена для домена: {domain}")
+                lines.append("Последующие запросы к этому домену будут использовать эту сессию автоматически.")
+                return "\n".join(lines)
+            finally:
+                await browser.close()
+
     def _reply_result(
         self, mail: IncomingMail, task_name: str, status: str, result: dict, elapsed: float
     ) -> None:
@@ -582,10 +744,22 @@ class Agent:
 
 
 def _parse_inline_params(text: str) -> dict[str, str]:
-    """Извлекает параметры вида key=value из строки."""
+    """Извлекает параметры вида key=value из строки.
+
+    Поддерживает:
+      - простые значения: key=value
+      - URL: url=https://example.com/path?q=1
+      - quoted: key="value with spaces"
+    """
     result: dict[str, str] = {}
-    for m in re.finditer(r"(\w+)=(\S+)", text):
+    # Сначала ищем quoted-значения, затем обычные (включая URL)
+    for m in re.finditer(r'([\w\u0400-\u04ff]+)="([^"]*)"', text):
         result[m.group(1)] = m.group(2)
+    # Не перезаписываем уже найденные quoted, ищем оставшиеся key=value
+    for m in re.finditer(r'([\w\u0400-\u04ff]+)=([^\s"]+)', text):
+        key = m.group(1)
+        if key not in result:
+            result[key] = m.group(2)
     return result
 
 

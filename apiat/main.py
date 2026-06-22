@@ -107,6 +107,8 @@ class Agent:
 
         self.storage.mark_mail_processed(mail.message_id, mail.sender)
 
+        logger.warning("Тело письма (repr): %r", mail.body[:300])
+
         # Команда оператора: обновить код с GitHub
         if _UPDATE_CMD_RE.search(mail.body):
             await self._handle_update_command(mail)

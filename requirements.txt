@@ -5,7 +5,6 @@ openai>=1.40
 burr>=0.30
 playwright>=1.45
 yt-dlp>=2024.8.6
-duckduckgo-search>=6.0
 
 # Dev / tests
 pytest>=8.0

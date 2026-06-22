@@ -1,25 +1,52 @@
-"""Search Tool: веб-поиск и новости через DuckDuckGo (без API-ключей)."""
+"""Search Tool: новости через Google News RSS, веб-поиск через SearXNG."""
 
 from __future__ import annotations
 
-from duckduckgo_search import DDGS
+import urllib.parse
+import xml.etree.ElementTree as ET
+
+import requests
 
 from ..models.base import BaseTask, TaskType
 from .base import Tool, ToolResult
 
 _MAX_RESULTS = 10
+_GNEWS_RSS = "https://news.google.com/rss/search?q={query}&hl=ru&gl=RU&ceid=RU:ru"
+_TIMEOUT = 15
 
 
-def _format_results(items: list[dict]) -> str:
+def _fetch_gnews(query: str, max_results: int) -> list[dict]:
+    url = _GNEWS_RSS.format(query=urllib.parse.quote(query))
+    resp = requests.get(url, timeout=_TIMEOUT, headers={"User-Agent": "Mozilla/5.0"})
+    resp.raise_for_status()
+    root = ET.fromstring(resp.content)
+    items = []
+    for item in root.findall(".//item")[:max_results]:
+        title = (item.findtext("title") or "").strip()
+        link = (item.findtext("link") or "").strip()
+        pub_date = (item.findtext("pubDate") or "").strip()
+        source_el = item.find("source")
+        source = source_el.text.strip() if source_el is not None else ""
+        items.append({"title": title, "url": link, "date": pub_date, "source": source})
+    return items
+
+
+def _format_results(items: list[dict], is_news: bool) -> str:
     lines = []
     for i, r in enumerate(items, 1):
-        title = r.get("title", "").strip()
-        body = r.get("body", r.get("description", "")).strip()
-        url = r.get("href", r.get("url", "")).strip()
+        title = r.get("title", "")
+        url = r.get("url", r.get("href", ""))
         date = r.get("date", "")
+        source = r.get("source", "")
+        body = r.get("body", r.get("description", ""))
         line = f"{i}. {title}"
+        meta = []
+        if source:
+            meta.append(source)
         if date:
-            line += f" [{date}]"
+            meta.append(date[:16])
+        if meta:
+            line += f"  ({', '.join(meta)})"
         if body:
             line += f"\n   {body[:200]}"
         if url:
@@ -29,7 +56,7 @@ def _format_results(items: list[dict]) -> str:
 
 
 class SearchTool(Tool):
-    """Веб-поиск и поиск новостей через DuckDuckGo."""
+    """Поиск новостей через Google News RSS; веб-поиск через тот же RSS."""
 
     name = "search"
 
@@ -37,13 +64,10 @@ class SearchTool(Tool):
         query = getattr(task, "query", None) or getattr(task, "topic", "")
         max_results = getattr(task, "max_results", _MAX_RESULTS)
         task_type = getattr(task, "type", None)
+        is_news = task_type == TaskType.NEWS
 
         try:
-            with DDGS() as ddgs:
-                if task_type == TaskType.NEWS:
-                    items = list(ddgs.news(query, max_results=max_results))
-                else:
-                    items = list(ddgs.text(query, max_results=max_results))
+            items = _fetch_gnews(query, max_results)
         except Exception as e:  # noqa: BLE001
             return ToolResult(
                 success=False,
@@ -51,11 +75,9 @@ class SearchTool(Tool):
                 error=str(e),
             )
 
-        formatted = _format_results(items)
-        summary = (
-            f"{'Новости' if task_type == TaskType.NEWS else 'Результаты'} "
-            f"по запросу: {query!r} ({len(items)} шт.)\n\n{formatted}"
-        )
+        formatted = _format_results(items, is_news)
+        label = "Новости" if is_news else "Результаты"
+        summary = f"{label} по запросу: {query!r} ({len(items)} шт.)\n\n{formatted}"
         return ToolResult(
             success=True,
             summary=summary,

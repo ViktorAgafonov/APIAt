@@ -39,7 +39,7 @@ _UPDATE_CMD_RE = re.compile(
 # Команда самообучения: "самообучись: <описание>"
 _LEARN_CMD_RE = re.compile(
     r"^(самообучись|learn)\s*[:\-]?\s*(.+)",
-    re.IGNORECASE | re.DOTALL,
+    re.IGNORECASE | re.MULTILINE,
 )
 
 # Подтверждение навыка: "подтверди навык <имя>"
@@ -69,7 +69,7 @@ _SAVE_CHAIN_RE = re.compile(
 # Построить цепочку через LLM: "цепочка: <задача>"
 _CHAIN_TASK_RE = re.compile(
     r"^(цепочка|chain)\s*[:\-]?\s*(.+)",
-    re.IGNORECASE | re.DOTALL,
+    re.IGNORECASE | re.MULTILINE,
 )
 
 

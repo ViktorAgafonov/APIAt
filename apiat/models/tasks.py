@@ -21,6 +21,7 @@ class SearchTask(BaseTask):
     type: Literal[TaskType.SEARCH] = TaskType.SEARCH
     query: str
     max_results: int = 5
+    use_rss: bool = False
 
 
 class NewsTask(BaseTask):
@@ -29,6 +30,7 @@ class NewsTask(BaseTask):
     type: Literal[TaskType.NEWS] = TaskType.NEWS
     topic: str
     max_results: int = 5
+    use_rss: bool = False
 
 
 class DownloadTask(BaseTask):

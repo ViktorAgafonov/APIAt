@@ -89,7 +89,7 @@ class Agent:
         self.storage = Storage(self.settings.db_path)
         self.imap = ImapClient(self.settings)
         self.parser = IntentParser(self.settings)
-        self.registry = ToolRegistry(self.settings.data_dir)
+        self.registry = ToolRegistry(self.settings.data_dir, llm_router=self.parser.router)
         self.engine = WorkflowEngine(self.registry, self.settings.db_path)
         self.sender = EmailSender(self.settings)
         self.skill_builder = SkillBuilder(self.settings, self.settings.data_dir / "skills")

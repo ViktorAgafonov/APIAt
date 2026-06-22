@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import subprocess
 import time
 
 from .config import Settings, get_settings
@@ -24,6 +25,12 @@ logger = get_logger(__name__)
 # Ключевые слова для команды переключения/настройки LLM от оператора
 _LLM_CMD_RE = re.compile(
     r"(переключи\s*llm|смени\s*нейромодель|switch\s*llm|llm\s*config)",
+    re.IGNORECASE,
+)
+
+# Команда самообновления кода с GitHub
+_UPDATE_CMD_RE = re.compile(
+    r"(обнови\s*код|update\s*code|git\s*pull)",
     re.IGNORECASE,
 )
 
@@ -55,6 +62,11 @@ class Agent:
             return
 
         self.storage.mark_mail_processed(mail.message_id, mail.sender)
+
+        # Команда оператора: обновить код с GitHub
+        if _UPDATE_CMD_RE.search(mail.body):
+            await self._handle_update_command(mail)
+            return
 
         # Команда оператора: изменить настройки LLM
         if _LLM_CMD_RE.search(mail.body):
@@ -103,6 +115,75 @@ class Agent:
             metrics={"execution_time": round(elapsed, 2)},
         )
         self._reply_result(mail, task.type.value, status, result, elapsed)
+
+    async def _handle_update_command(self, mail: IncomingMail) -> None:
+        """git pull + pip install + systemctl restart apiat.
+
+        Выполняется только если письмо авторизовано (whitelist + токен).
+        Перед обновлением делает snapshot текущего HEAD для отката.
+        """
+        from pathlib import Path
+
+        project_dir = Path(__file__).parent.parent
+        lines: list[str] = []
+
+        def _run(cmd: list[str], cwd=project_dir) -> tuple[int, str]:
+            r = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=120)
+            return r.returncode, (r.stdout + r.stderr).strip()
+
+        # Сохраняем текущий HEAD для возможного отката
+        rc, old_head = _run(["git", "rev-parse", "HEAD"])
+        old_head = old_head.strip()
+        lines.append(f"Текущий HEAD: {old_head[:12]}")
+
+        # git pull
+        rc, out = _run(["git", "pull", "origin", "main"])
+        lines.append(f"git pull: {'OK' if rc == 0 else 'ОШИБКА'}\n{out}")
+        if rc != 0:
+            self._safe_send(OutgoingMail(
+                to=mail.sender, subject="APIAt: обновление FAILED",
+                body="\n".join(lines), in_reply_to=mail.message_id,
+            ))
+            return
+
+        rc, new_head = _run(["git", "rev-parse", "HEAD"])
+        new_head = new_head.strip()
+        if old_head == new_head:
+            lines.append("Код уже актуален, перезапуск не требуется.")
+            self._safe_send(OutgoingMail(
+                to=mail.sender, subject="APIAt: уже актуален",
+                body="\n".join(lines), in_reply_to=mail.message_id,
+            ))
+            return
+        lines.append(f"Новый HEAD: {new_head[:12]}")
+
+        # pip install (только если изменился requirements.txt)
+        venv_pip = project_dir / ".venv" / "bin" / "pip"
+        if not venv_pip.exists():
+            venv_pip = project_dir / ".venv" / "Scripts" / "pip"
+        rc, out = _run([str(venv_pip), "install", "-r", "requirements.txt", "-q"])
+        lines.append(f"pip install: {'OK' if rc == 0 else 'ОШИБКА'}\n{out[:300]}")
+        if rc != 0:
+            # Откатываем git
+            _run(["git", "checkout", old_head])
+            lines.append(f"Откат к {old_head[:12]} выполнен.")
+            self._safe_send(OutgoingMail(
+                to=mail.sender, subject="APIAt: обновление FAILED (откат)",
+                body="\n".join(lines), in_reply_to=mail.message_id,
+            ))
+            return
+
+        # Перезапуск сервиса
+        rc, out = _run(["systemctl", "restart", "apiat"])
+        lines.append(f"systemctl restart: {'OK' if rc == 0 else 'ОШИБКА'}\n{out}")
+
+        logger.info("Самообновление: %s -> %s", old_head[:12], new_head[:12])
+        self._safe_send(OutgoingMail(
+            to=mail.sender,
+            subject=f"APIAt: обновлён до {new_head[:12]}",
+            body="\n".join(lines),
+            in_reply_to=mail.message_id,
+        ))
 
     async def _handle_llm_config_command(self, mail: IncomingMail) -> None:
         """Разбирает команду оператора и применяет/откатывает изменения .env LLM.

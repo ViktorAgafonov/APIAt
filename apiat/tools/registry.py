@@ -16,12 +16,12 @@ from .youtube_tool import YoutubeTool
 class ToolRegistry:
     """Хранит и выдаёт инструменты по имени/типу задачи."""
 
-    def __init__(self, data_dir: str | Path = "data", llm_router=None) -> None:
+    def __init__(self, data_dir: str | Path = "data", llm_router=None, storage=None) -> None:
         self._tools: dict[str, Tool] = {
             "search": SearchTool(llm_router=llm_router),
             "youtube": YoutubeTool(data_dir),
             "download": DownloadTool(data_dir),
-            "browser": BrowserTool(),
+            "browser": BrowserTool(storage=storage),
             "archive": ArchiveTool(data_dir),
         }
         # Соответствие тип задачи -> имя инструмента

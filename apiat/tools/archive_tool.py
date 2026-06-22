@@ -21,6 +21,11 @@ class ArchiveTool(Tool):
 
     async def execute(self, task: BaseTask) -> ToolResult:
         paths = [Path(p) for p in getattr(task, "paths", [])]
+        # Добавляем вложения из входящего письма
+        for p in getattr(task, "input_attachments", []):
+            pp = Path(p)
+            if pp.exists() and pp not in paths:
+                paths.append(pp)
         if not paths:
             return ToolResult(success=False, error="Список файлов пуст")
         self._dir.mkdir(parents=True, exist_ok=True)

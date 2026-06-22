@@ -89,7 +89,7 @@ class Agent:
         self.storage = Storage(self.settings.db_path)
         self.imap = ImapClient(self.settings)
         self.parser = IntentParser(self.settings)
-        self.registry = ToolRegistry(self.settings.data_dir, llm_router=self.parser.router)
+        self.registry = ToolRegistry(self.settings.data_dir, llm_router=self.parser.router, storage=self.storage)
         self.engine = WorkflowEngine(self.registry, self.settings.db_path)
         self.sender = EmailSender(self.settings)
         self.skill_builder = SkillBuilder(self.settings, self.settings.data_dir / "skills")
@@ -175,6 +175,9 @@ class Agent:
 
         try:
             task = await self.parser.parse(mail)
+            # Прокидываем пути вложений в задачу если тип поддерживает
+            if mail.attachments and hasattr(task, "input_attachments"):
+                task.input_attachments = [a.path for a in mail.attachments if a.path]
         except LlmAllProvidersFailedError as exc:
             logger.error("Все LLM-провайдеры недоступны: %s", exc)
             self._reply_error(

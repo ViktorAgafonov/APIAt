@@ -48,6 +48,8 @@ class YoutubeTask(BaseTask):
     url: str
     format: YoutubeFormat = YoutubeFormat.MP4
     max_quality: int | None = None  # ограничение по высоте, напр. 720
+    subtitles: bool = False          # скачать субтитры
+    metadata_only: bool = False      # только метаданные без скачивания
 
 
 class BrowserTask(BaseTask):
@@ -64,6 +66,7 @@ class FileTask(BaseTask):
     type: Literal[TaskType.FILE] = TaskType.FILE
     operation: Literal["archive", "split"]
     paths: list[str] = Field(default_factory=list)
+    input_attachments: list[str] = Field(default_factory=list)
 
 
 # Дискриминируемое объединение для типобезопасного парсинга

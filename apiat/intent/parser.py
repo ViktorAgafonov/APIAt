@@ -36,6 +36,12 @@ class IntentParser:
     async def parse(self, mail: IncomingMail) -> AnyTask:
         """Разбирает письмо в типизированную задачу через LlmRouter."""
         text = f"Тема: {mail.subject}\n\n{mail.body}"
+        if mail.attachments:
+            att_info = ", ".join(
+                f"{a.filename} ({a.content_type}, {a.size} bytes)"
+                for a in mail.attachments
+            )
+            text += f"\n\n[Вложения от пользователя: {att_info}]"
         result = await self._router.run_agent(self._agent_factory, text)
         task = result.output
         task.source_email = mail.sender

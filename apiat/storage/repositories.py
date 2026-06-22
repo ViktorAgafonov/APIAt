@@ -144,3 +144,70 @@ class Storage:
             return row["value"] if row else None
         finally:
             conn.close()
+
+    # --- браузерные сессии ---
+    def save_browser_session(self, domain: str, storage_state: dict) -> None:
+        conn = self._conn()
+        try:
+            conn.execute(
+                "INSERT INTO browser_sessions (domain, storage) VALUES (?, ?) "
+                "ON CONFLICT(domain) DO UPDATE SET storage=excluded.storage, updated_at=datetime('now')",
+                (domain, json.dumps(storage_state, default=str)),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def load_browser_session(self, domain: str) -> dict | None:
+        conn = self._conn()
+        try:
+            row = conn.execute(
+                "SELECT storage FROM browser_sessions WHERE domain = ?", (domain,)
+            ).fetchone()
+            return json.loads(row["storage"]) if row else None
+        finally:
+            conn.close()
+
+    def save_cookies(self, domain: str, cookies: list) -> None:
+        conn = self._conn()
+        try:
+            conn.execute(
+                "INSERT INTO cookies (domain, data) VALUES (?, ?) "
+                "ON CONFLICT(domain) DO UPDATE SET data=excluded.data, updated_at=datetime('now')",
+                (domain, json.dumps(cookies, default=str)),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def load_cookies(self, domain: str) -> list:
+        conn = self._conn()
+        try:
+            row = conn.execute(
+                "SELECT data FROM cookies WHERE domain = ?", (domain,)
+            ).fetchone()
+            return json.loads(row["data"]) if row else []
+        finally:
+            conn.close()
+
+    def save_token(self, name: str, value: str) -> None:
+        conn = self._conn()
+        try:
+            conn.execute(
+                "INSERT INTO tokens (name, value) VALUES (?, ?) "
+                "ON CONFLICT(name) DO UPDATE SET value=excluded.value, updated_at=datetime('now')",
+                (name, value),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def load_token(self, name: str) -> str | None:
+        conn = self._conn()
+        try:
+            row = conn.execute(
+                "SELECT value FROM tokens WHERE name = ?", (name,)
+            ).fetchone()
+            return row["value"] if row else None
+        finally:
+            conn.close()

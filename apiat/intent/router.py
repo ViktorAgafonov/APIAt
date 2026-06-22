@@ -33,8 +33,15 @@ class LlmAllProvidersFailedError(RuntimeError):
 class LlmRouter:
     """Роутер LLM-провайдеров с автоматическим failover и диагностикой."""
 
-    def __init__(self, settings: Settings) -> None:
-        self._settings = settings
+    def __init__(self, settings: Settings | list) -> None:
+        # Принимает либо Settings, либо готовый список LlmProviderConfig
+        if isinstance(settings, list):
+            from ..config import Settings as _Settings
+            self._providers_override: list = settings
+            self._settings: _Settings | None = None
+        else:
+            self._providers_override = []
+            self._settings = settings
         # provider_name -> время последней ошибки (monotonic)
         self._failed_at: dict[str, float] = {}
         # кэшированные pydantic-ai модели
@@ -61,12 +68,51 @@ class LlmRouter:
         self._models[cfg.name] = model
         return model
 
+    def _get_providers(self) -> list:
+        if self._providers_override:
+            return self._providers_override
+        return self._settings.llm_providers()  # type: ignore[union-attr]
+
+    def is_using_fallback(self) -> bool:
+        """True если primary провайдер в cooldown и активен fallback."""
+        providers = self._get_providers()
+        if not providers:
+            return False
+        return self._is_cooling_down(providers[0].name)
+
+    async def complete(self, prompt: str) -> str:
+        """Простой текстовый запрос к LLM, возвращает строку ответа."""
+        import pydantic_ai
+
+        providers = self._get_providers()
+        reasons: dict[str, str] = {}
+
+        for cfg in providers:
+            if self._is_cooling_down(cfg.name):
+                reasons[cfg.name] = "cooldown после ошибки"
+                continue
+            try:
+                model = self._build_model(cfg)
+                agent = pydantic_ai.Agent(model, output_type=str)
+                result = await agent.run(prompt)
+                if cfg.name in self._failed_at:
+                    logger.info("Провайдер '%s' снова доступен", cfg.name)
+                    self._reset(cfg.name)
+                return result.output
+            except Exception as exc:  # noqa: BLE001
+                reason = f"{type(exc).__name__}: {exc}"
+                logger.warning("Провайдер '%s' недоступен: %s", cfg.name, reason)
+                reasons[cfg.name] = reason
+                self._mark_failed(cfg.name)
+
+        raise LlmAllProvidersFailedError(reasons)
+
     async def run_agent(self, agent_factory, prompt: str) -> Any:
         """Запускает PydanticAI-агент через каждый провайдер по порядку.
 
         agent_factory(model) -> pydantic_ai.Agent
         """
-        providers = self._settings.llm_providers()
+        providers = self._get_providers()
         reasons: dict[str, str] = {}
 
         for cfg in providers:
@@ -92,7 +138,7 @@ class LlmRouter:
     @property
     def active_provider_name(self) -> str:
         """Имя первого не-cooldown провайдера (для диагностики)."""
-        for cfg in self._settings.llm_providers():
+        for cfg in self._get_providers():
             if not self._is_cooling_down(cfg.name):
                 return cfg.name
         return "none"

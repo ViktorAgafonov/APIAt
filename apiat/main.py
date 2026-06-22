@@ -14,6 +14,7 @@ from .intent.router import LlmAllProvidersFailedError
 from .intent.self_corrector import SelfCorrector, try_apply_and_verify
 from .models.base import TaskStatus
 from .models.email import IncomingMail, OutgoingMail
+from .skills.builder import SkillBuilder
 from .storage.repositories import Storage
 from .tools.email_tool import EmailSender
 from .tools.registry import ToolRegistry
@@ -34,6 +35,18 @@ _UPDATE_CMD_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Команда самообучения: "самообучись: <описание>"
+_LEARN_CMD_RE = re.compile(
+    r"^(самообучись|learn)\s*[:\-]?\s*(.+)",
+    re.IGNORECASE | re.DOTALL,
+)
+
+# Подтверждение навыка: "подтверди навык <имя>"
+_CONFIRM_SKILL_RE = re.compile(
+    r"(подтверди\s*навык|confirm\s*skill)\s*[:\-]?\s*(\S+)",
+    re.IGNORECASE,
+)
+
 
 class Agent:
     """Сборка компонентов APIAt и обработка входящих писем."""
@@ -47,6 +60,7 @@ class Agent:
         self.registry = ToolRegistry(self.settings.data_dir)
         self.engine = WorkflowEngine(self.registry, self.settings.db_path)
         self.sender = EmailSender(self.settings)
+        self.skill_builder = SkillBuilder(self.settings, self.settings.data_dir / "skills")
 
     async def process_mail(self, mail: IncomingMail) -> None:
         """Полный цикл обработки одного письма."""
@@ -66,6 +80,18 @@ class Agent:
         # Команда оператора: обновить код с GitHub
         if _UPDATE_CMD_RE.search(mail.body):
             await self._handle_update_command(mail)
+            return
+
+        # Команда оператора: самообучение
+        learn_match = _LEARN_CMD_RE.search(mail.body)
+        if learn_match:
+            await self._handle_learn_command(mail, learn_match.group(2).strip())
+            return
+
+        # Команда оператора: подтвердить навык
+        confirm_match = _CONFIRM_SKILL_RE.search(mail.body)
+        if confirm_match:
+            await self._handle_confirm_skill(mail, confirm_match.group(2).strip())
             return
 
         # Команда оператора: изменить настройки LLM
@@ -182,6 +208,62 @@ class Agent:
             to=mail.sender,
             subject=f"APIAt: обновлён до {new_head[:12]}",
             body="\n".join(lines),
+            in_reply_to=mail.message_id,
+        ))
+
+    async def _handle_learn_command(self, mail: IncomingMail, user_prompt: str) -> None:
+        """Запускает цикл самообучения: генерация → ревью → sandbox → валидация."""
+        logger.info("Самообучение по запросу: %s", user_prompt[:80])
+        result = await self.skill_builder.build(user_prompt)
+
+        steps_text = "\n".join(result.steps)
+        if not result.success:
+            body = (
+                f"Навык не получен: {result.error}\n\n"
+                f"Шаги выполнения:\n{steps_text}"
+            )
+            self._safe_send(OutgoingMail(
+                to=mail.sender,
+                subject="APIAt: навык не получен",
+                body=body,
+                in_reply_to=mail.message_id,
+            ))
+            return
+
+        body = (
+            f"Навык готов к проверке: <b>{result.skill_name}</b>\n\n"
+            f"Шаги выполнения:\n{steps_text}\n\n"
+            f"--- Вывод навыка ---\n{result.sandbox_output}\n\n"
+            f"Если результат вас устраивает, ответьте:\n"
+            f"подтверди навык {result.skill_name}"
+        )
+        self._safe_send(OutgoingMail(
+            to=mail.sender,
+            subject=f"APIAt: навык '{result.skill_name}' ожидает подтверждения",
+            body=body,
+            in_reply_to=mail.message_id,
+        ))
+
+    async def _handle_confirm_skill(self, mail: IncomingMail, skill_name: str) -> None:
+        """Перемещает навык из pending/ в skills/."""
+        ok = self.skill_builder.confirm(skill_name)
+        pending = self.skill_builder.list_pending()
+        if ok:
+            body = (
+                f"Навык '{skill_name}' закреплён в data/skills/.\n"
+                f"Ожидают подтверждения: {', '.join(pending) or 'нет'}"
+            )
+            subject = f"APIAt: навык '{skill_name}' закреплён"
+        else:
+            body = (
+                f"Навык '{skill_name}' не найден в pending/.\n"
+                f"Доступные навыки для подтверждения: {', '.join(pending) or 'нет'}"
+            )
+            subject = f"APIAt: навык '{skill_name}' не найден"
+        self._safe_send(OutgoingMail(
+            to=mail.sender,
+            subject=subject,
+            body=body,
             in_reply_to=mail.message_id,
         ))
 

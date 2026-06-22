@@ -119,6 +119,8 @@ class Settings(BaseSettings):
             self.data_dir / "browser" / "cookies",
             self.data_dir / "archive" / "parts",
             self.data_dir / "tmp",
+            self.data_dir / "skills",
+            self.data_dir / "skills" / "pending",
         ]:
             sub.mkdir(parents=True, exist_ok=True)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)

@@ -135,9 +135,17 @@ def run_in_sandbox(
             if not mount_src and data_dir:
                 mount_src = str(data_dir / "downloads" / "done")
             if mount_src:
-                Path(mount_src).mkdir(parents=True, exist_ok=True)
-                cmd += ["--volume", f"{mount_src}:/data:rw"]
-                # /data доступен на запись — убираем --read-only для корневой fs
+                # Безопасность: разрешаем только пути внутри data_dir
+                mount_path = Path(mount_src).resolve()
+                allowed_root = data_dir.resolve() if data_dir else None
+                if allowed_root and not str(mount_path).startswith(str(allowed_root)):
+                    return SandboxResult(
+                        success=False, stdout="",
+                        stderr=f"Недопустимый storage_mount: {mount_src} (вне data_dir)",
+                        exit_code=-3,
+                    )
+                mount_path.mkdir(parents=True, exist_ok=True)
+                cmd += ["--volume", f"{mount_path}:/data:rw"]
                 cmd.remove("--read-only")
                 cmd += ["--tmpfs", f"/tmp:size={cfg.tmpfs_size}"]
 

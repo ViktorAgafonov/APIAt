@@ -10,7 +10,8 @@ from ..models.base import BaseTask
 from ..models.email import Attachment
 from .base import Tool, ToolResult
 
-CHUNK = 1 << 16  # 64 KiB
+CHUNK = 1 << 16        # 64 KiB
+MAX_DOWNLOAD = 100 * 1024 * 1024  # 100 MB — защита от переполнения диска
 
 
 class DownloadTool(Tool):
@@ -45,10 +46,14 @@ class DownloadTool(Tool):
         )
 
     def _stream(self, url: str, target: Path) -> int:
-        """Качает файл чанками, возвращает число байт."""
+        """Качает файл чанками, возвращает число байт. Прерывает при превышении MAX_DOWNLOAD."""
         written = 0
         with urllib.request.urlopen(url) as response, target.open("wb") as fh:  # noqa: S310
             while chunk := response.read(CHUNK):
-                fh.write(chunk)
                 written += len(chunk)
+                if written > MAX_DOWNLOAD:
+                    fh.close()
+                    target.unlink(missing_ok=True)
+                    raise ValueError(f"Файл превышает лимит {MAX_DOWNLOAD // 1024 // 1024} MB")
+                fh.write(chunk)
         return written

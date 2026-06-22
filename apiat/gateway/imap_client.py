@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import email
 import imaplib
+import re
 from email.header import decode_header, make_header
 from email.message import Message
 from pathlib import Path
@@ -13,6 +14,8 @@ from ..models.email import Attachment, IncomingMail
 from ..utils.logging import get_logger
 
 logger = get_logger(__name__)
+
+_MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024  # 25 MB
 
 
 def _decode(value: str | None) -> str:
@@ -60,7 +63,10 @@ class ImapClient:
                 conn.close()
             except Exception:  # noqa: BLE001
                 pass
-            conn.logout()
+            try:
+                conn.logout()
+            except Exception:  # noqa: BLE001
+                pass
         return mails
 
     def _parse(self, msg: Message) -> IncomingMail:
@@ -88,8 +94,13 @@ class ImapClient:
             content_type = part.get_content_type()
 
             if "attachment" in disposition:
-                filename = _decode(part.get_filename()) or "attachment.bin"
+                raw_name = _decode(part.get_filename()) or "attachment.bin"
+                # Sanitize: убираем path traversal и недопустимые символы
+                filename = re.sub(r"[^\w.\-]", "_", Path(raw_name).name)[:200] or "attachment.bin"
                 payload = part.get_payload(decode=True) or b""
+                if len(payload) > _MAX_ATTACHMENT_BYTES:
+                    logger.warning("Вложение %s превышает лимит (%d байт), пропуск", filename, len(payload))
+                    continue
                 attach_dir.mkdir(parents=True, exist_ok=True)
                 file_path = attach_dir / filename
                 file_path.write_bytes(payload)

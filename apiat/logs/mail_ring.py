@@ -10,6 +10,14 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from ..models.email import IncomingMail
 
+
+def _mask_token(text: str, token: str) -> str:
+    """Заменяет токен в тексте на ***."""
+    if not token:
+        return text
+    import re
+    return re.sub(re.escape(token), "***", text, flags=re.IGNORECASE)
+
 _RING_SIZE = 50
 _RING_FILE = "mail_ring.json"
 _REC_FILE = "recommendations.json"
@@ -32,13 +40,20 @@ class MailRingLog:
         self._ring_path.unlink(missing_ok=True)
         self._ring: list[dict] = []
 
-    def push(self, mail: "IncomingMail", task_type: str | None = None, status: str | None = None) -> None:
+    def push(
+        self,
+        mail: "IncomingMail",
+        task_type: str | None = None,
+        status: str | None = None,
+        secret_token: str = "",
+    ) -> None:
         """Добавляет запись о письме; вытесняет самое старое если >ring_size."""
+        preview = _mask_token(mail.body[:300], secret_token)
         entry = {
             "ts": datetime.now(timezone.utc).isoformat(),
             "sender": mail.sender,
             "subject": mail.subject,
-            "body_preview": mail.body[:300],
+            "body_preview": preview,
             "task_type": task_type,
             "status": status,
             "has_attachments": len(mail.attachments) > 0,

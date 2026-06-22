@@ -16,9 +16,25 @@ class Storage:
     def __init__(self, db_path: str | Path) -> None:
         self._db_path = str(db_path)
         init_db(self._db_path)
+        self._purge_old_records()
 
     def _conn(self) -> sqlite3.Connection:
         return connect(self._db_path)
+
+    def _purge_old_records(self) -> None:
+        """Удаляет устаревшие записи чтобы БД не росла бесконечно."""
+        conn = self._conn()
+        try:
+            conn.executescript("""
+                DELETE FROM processed_mail WHERE processed_at < datetime('now', '-90 days');
+                DELETE FROM history        WHERE created_at  < datetime('now', '-45 days');
+                DELETE FROM results        WHERE created_at  < datetime('now', '-45 days');
+                DELETE FROM tasks          WHERE updated_at  < datetime('now', '-45 days');
+            """)
+            conn.execute("VACUUM")
+            conn.commit()
+        finally:
+            conn.close()
 
     # --- dedup входящей почты ---
     def is_mail_processed(self, message_id: str) -> bool:
@@ -163,6 +179,17 @@ class Storage:
                 (f"wl:{email.strip().lower()}",),
             )
             conn.commit()
+        finally:
+            conn.close()
+
+    def whitelist_get_excluded(self) -> set[str]:
+        """Возвращает адреса помеченные как удалённые (overrides .env whitelist)."""
+        conn = self._conn()
+        try:
+            rows = conn.execute(
+                "SELECT key FROM settings WHERE key LIKE 'wl_excluded:%'"
+            ).fetchall()
+            return {r["key"][len("wl_excluded:"):] for r in rows}
         finally:
             conn.close()
 

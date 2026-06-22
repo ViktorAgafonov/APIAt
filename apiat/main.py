@@ -253,6 +253,7 @@ class Agent:
                 task.input_attachments = [a.path for a in mail.attachments if a.path]
         except LlmAllProvidersFailedError as exc:
             logger.error("Все LLM-провайдеры недоступны: %s", exc)
+            self.mail_ring.push(mail, task_type=None, status="FAILED:llm_unavailable", secret_token=self.settings.secret_token)
             self._reply_error(
                 mail,
                 f"Все LLM-провайдеры недоступны:\n{exc}\n\n"
@@ -261,6 +262,7 @@ class Agent:
             return
         except Exception as exc:  # noqa: BLE001
             logger.exception("Ошибка парсинга интента")
+            self.mail_ring.push(mail, task_type=None, status="FAILED:parse_error", secret_token=self.settings.secret_token)
             self._reply_error(mail, f"Не удалось разобрать задачу: {exc}")
             return
 
@@ -274,6 +276,7 @@ class Agent:
         except Exception as exc:  # noqa: BLE001
             logger.exception("Ошибка workflow")
             self.storage.update_status(task.task_id, TaskStatus.FAILED, str(exc))
+            self.mail_ring.push(mail, task_type=task.type.value, status="FAILED:workflow_error", secret_token=self.settings.secret_token)
             self._reply_error(mail, f"Ошибка выполнения: {exc}", task_name=task.type.value)
             return
 
@@ -288,7 +291,7 @@ class Agent:
             data=result.get("data", {}),
             metrics={"execution_time": round(elapsed, 2)},
         )
-        self.mail_ring.push(mail, task_type=task.type.value, status=status)
+        self.mail_ring.push(mail, task_type=task.type.value, status=status, secret_token=self.settings.secret_token)
         self._reply_result(mail, task.type.value, status, result, elapsed)
 
     async def _handle_update_sandbox(self, mail: IncomingMail) -> None:
@@ -710,14 +713,7 @@ class Agent:
         """Объединяет whitelist из .env и динамические записи из БД, учитывает исключения."""
         base = [a.lower() for a in self.settings.whitelist]
         extra = self.storage.whitelist_get()
-        conn = self.storage._conn()
-        try:
-            rows = conn.execute(
-                "SELECT key FROM settings WHERE key LIKE 'wl_excluded:%'"
-            ).fetchall()
-            excluded_set = {r["key"][len("wl_excluded:"):] for r in rows}
-        finally:
-            conn.close()
+        excluded_set = self.storage.whitelist_get_excluded()
         seen: dict[str, None] = {}
         for addr in base + extra:
             if addr not in excluded_set:

@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import re
 import time
 
 from .config import Settings, get_settings
 from .gateway.imap_client import ImapClient
 from .gateway.security import is_authorized
 from .intent.parser import IntentParser
+from .intent.router import LlmAllProvidersFailedError
+from .intent.self_corrector import SelfCorrector, try_apply_and_verify
 from .models.base import TaskStatus
 from .models.email import IncomingMail, OutgoingMail
 from .storage.repositories import Storage
@@ -17,6 +20,12 @@ from .utils.logging import get_logger
 from .workflow.engine import WorkflowEngine
 
 logger = get_logger(__name__)
+
+# Ключевые слова для команды переключения/настройки LLM от оператора
+_LLM_CMD_RE = re.compile(
+    r"(переключи\s*llm|смени\s*нейромодель|switch\s*llm|llm\s*config)",
+    re.IGNORECASE,
+)
 
 
 class Agent:
@@ -46,10 +55,24 @@ class Agent:
             return
 
         self.storage.mark_mail_processed(mail.message_id, mail.sender)
+
+        # Команда оператора: изменить настройки LLM
+        if _LLM_CMD_RE.search(mail.body):
+            await self._handle_llm_config_command(mail)
+            return
+
         started = time.monotonic()
 
         try:
             task = await self.parser.parse(mail)
+        except LlmAllProvidersFailedError as exc:
+            logger.error("Все LLM-провайдеры недоступны: %s", exc)
+            self._reply_error(
+                mail,
+                f"Все LLM-провайдеры недоступны:\n{exc}\n\n"
+                f"Отправьте команду 'переключи LLM' с новыми параметрами.",
+            )
+            return
         except Exception as exc:  # noqa: BLE001
             logger.exception("Ошибка парсинга интента")
             self._reply_error(mail, f"Не удалось разобрать задачу: {exc}")
@@ -80,6 +103,52 @@ class Agent:
             metrics={"execution_time": round(elapsed, 2)},
         )
         self._reply_result(mail, task.type.value, status, result, elapsed)
+
+    async def _handle_llm_config_command(self, mail: IncomingMail) -> None:
+        """Разбирает команду оператора и применяет/откатывает изменения .env LLM.
+
+        Формат команды (в теле письма):
+            переключи llm
+            LLM_BASE_URL=https://...
+            LLM_API_KEY=...
+            LLM_MODEL_NAME=...
+
+        Без дополнительных ключей — показывает текущее состояние и diff с бэкапом.
+        """
+        corrector = SelfCorrector(self.settings.db_path.parent.parent / ".env")
+        updates = _parse_env_updates(mail.body)
+
+        if not updates:
+            # Нет новых значений — статус провайдеров
+            providers = self.settings.llm_providers()
+            router = self.parser.router
+            lines = ["Текущие LLM-провайдеры:"]
+            for p in providers:
+                status = "⚠ cooldown" if router._is_cooling_down(p.name) else "✓ доступен"
+                lines.append(f"  {p.name} ({p.provider_type}): {p.model_name} — {status}")
+            if corrector.has_backup():
+                lines.append("\nОтличия от .env.bak:")
+                lines.extend(corrector.diff())
+            self._safe_send(OutgoingMail(
+                to=mail.sender,
+                subject="APIAt: LLM статус",
+                body="\n".join(lines),
+                in_reply_to=mail.message_id,
+            ))
+            return
+
+        success, msg = await try_apply_and_verify(updates)
+        if success:
+            # Перезагружаем parser с новыми настройками
+            get_settings.cache_clear()
+            self.settings = get_settings()
+            self.parser = IntentParser(self.settings)
+        self._safe_send(OutgoingMail(
+            to=mail.sender,
+            subject=f"APIAt: LLM {'обновлён' if success else 'откат'}",
+            body=msg,
+            in_reply_to=mail.message_id,
+        ))
 
     def _reply_result(
         self, mail: IncomingMail, task_name: str, status: str, result: dict, elapsed: float
@@ -127,3 +196,18 @@ class Agent:
         for mail in mails:
             await self.process_mail(mail)
         return len(mails)
+
+
+def _parse_env_updates(body: str) -> dict[str, str]:
+    """Извлекает KEY=value из тела письма (только LLM-ключи)."""
+    allowed = {"LLM_BASE_URL", "LLM_API_KEY", "LLM_MODEL_NAME",
+               "LLM_FALLBACK_API_KEY", "LLM_FALLBACK_MODEL_NAME"}
+    result: dict[str, str] = {}
+    for line in body.splitlines():
+        line = line.strip()
+        if "=" in line and not line.startswith("#"):
+            key, _, value = line.partition("=")
+            key = key.strip()
+            if key in allowed and value.strip():
+                result[key] = value.strip()
+    return result

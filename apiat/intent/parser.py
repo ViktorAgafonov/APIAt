@@ -2,13 +2,11 @@
 
 from __future__ import annotations
 
-from typing import Any
-
 from ..config import Settings
 from ..models.email import IncomingMail
 from ..models.tasks import AnyTask
 from ..utils.logging import get_logger
-from .llm import build_model
+from .router import LlmRouter
 
 logger = get_logger(__name__)
 
@@ -23,29 +21,29 @@ SYSTEM_PROMPT = (
 
 
 class IntentParser:
-    """Обёртка над PydanticAI Agent для разбора интентов."""
+    """Обёртка над LlmRouter + PydanticAI Agent для разбора интентов."""
 
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
-        self._agent: Any | None = None
+        self._router = LlmRouter(settings)
 
-    def _get_agent(self) -> Any:
-        if self._agent is None:
-            from pydantic_ai import Agent
-
-            self._agent = Agent(
-                model=build_model(self._settings),
-                output_type=AnyTask,
-                system_prompt=SYSTEM_PROMPT,
-            )
-        return self._agent
+    def _agent_factory(self, model):
+        from pydantic_ai import Agent
+        return Agent(model=model, output_type=AnyTask, system_prompt=SYSTEM_PROMPT)
 
     async def parse(self, mail: IncomingMail) -> AnyTask:
-        """Разбирает письмо в типизированную задачу."""
+        """Разбирает письмо в типизированную задачу через LlmRouter."""
         text = f"Тема: {mail.subject}\n\n{mail.body}"
-        result = await self._get_agent().run(text)
+        result = await self._router.run_agent(self._agent_factory, text)
         task = result.output
         task.source_email = mail.sender
         task.message_id = mail.message_id
-        logger.info("Распознана задача типа %s (task_id=%s)", task.type, task.task_id)
+        logger.info(
+            "Распознана задача типа %s (task_id=%s) [провайдер: %s]",
+            task.type, task.task_id, self._router.active_provider_name,
+        )
         return task
+
+    @property
+    def router(self) -> LlmRouter:
+        return self._router

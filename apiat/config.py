@@ -4,10 +4,25 @@ from __future__ import annotations
 
 from functools import lru_cache
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Literal
 
-from pydantic import Field, field_validator
+from pydantic import BaseModel, Field, field_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
+
+
+class LlmProviderConfig(BaseModel):
+    """Конфигурация одного LLM-провайдера."""
+
+    name: str
+    provider_type: Literal["openai", "google"] = "openai"
+    base_url: str = ""
+    api_key: str = ""
+    model_name: str = ""
+    priority: int = 0  # меньше = выше приоритет
+
+    @property
+    def is_openai_compatible(self) -> bool:
+        return self.provider_type == "openai"
 
 
 class Settings(BaseSettings):
@@ -19,10 +34,14 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    # --- LLM (OpenAI-совместимый протокол) ---
+    # --- LLM Primary (OpenAI-совместимый, бесплатный, отладочный) ---
     llm_base_url: str = Field(default="https://ai.wormsoft.ru/api/gpt/", alias="LLM_BASE_URL")
     llm_api_key: str = Field(default="your-wormsoft-token", alias="LLM_API_KEY")
     llm_model_name: str = Field(default="wormsoft/agent/medium", alias="LLM_MODEL_NAME")
+
+    # --- LLM Fallback (Google Gemini, платный, резервный) ---
+    llm_fallback_api_key: str = Field(default="", alias="LLM_FALLBACK_API_KEY")
+    llm_fallback_model_name: str = Field(default="gemini-2.5-flash", alias="LLM_FALLBACK_MODEL_NAME")
 
     # --- IMAP ---
     imap_host: str = Field(default="", alias="IMAP_HOST")
@@ -63,6 +82,30 @@ class Settings(BaseSettings):
     def _ensure_trailing_slash(cls, value: str) -> str:
         # SDK добавляет относительный путь chat/completions — слеш обязателен
         return value if value.endswith("/") else value + "/"
+
+    def llm_providers(self) -> list[LlmProviderConfig]:
+        """Возвращает список провайдеров по приоритету (primary первый, fallback второй)."""
+        providers: list[LlmProviderConfig] = [
+            LlmProviderConfig(
+                name="primary",
+                provider_type="openai",
+                base_url=self.llm_base_url,
+                api_key=self.llm_api_key,
+                model_name=self.llm_model_name,
+                priority=0,
+            ),
+        ]
+        if self.llm_fallback_api_key:
+            providers.append(
+                LlmProviderConfig(
+                    name="fallback",
+                    provider_type="google",
+                    api_key=self.llm_fallback_api_key,
+                    model_name=self.llm_fallback_model_name,
+                    priority=1,
+                )
+            )
+        return sorted(providers, key=lambda p: p.priority)
 
     def ensure_dirs(self) -> None:
         """Создаёт каталоги данных при необходимости."""

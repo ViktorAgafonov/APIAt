@@ -47,7 +47,7 @@ class YoutubeTask(BaseTask):
     type: Literal[TaskType.YOUTUBE] = TaskType.YOUTUBE
     url: str = ""
     format: YoutubeFormat = YoutubeFormat.MP4
-    max_quality: int | None = None  # ограничение по высоте, напр. 720
+    max_quality: int = 480           # по умолчанию 480p для экономии трафика
     subtitles: bool = False          # скачать субтитры
     metadata_only: bool = False      # только метаданные без скачивания
     thumbnail: bool = False          # скачать обложку (thumbnail)

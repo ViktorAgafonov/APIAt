@@ -2,11 +2,18 @@
 
 from __future__ import annotations
 
+import shutil
+import time
 from pathlib import Path
 
 from ..models.base import BaseTask
 from ..models.email import Attachment
 from .base import Tool, ToolResult
+
+# Допустимые значения качества (ограничиваем снизу/сверху)
+_ALLOWED_QUALITIES = (144, 240, 360, 480, 720, 1080)
+_DEFAULT_QUALITY = 480
+_YOUTUBE_TTL_SEC = 2 * 3600  # 2 часа во временной папке
 
 
 class YoutubeTool(Tool):
@@ -16,16 +23,43 @@ class YoutubeTool(Tool):
 
     def __init__(self, data_dir: str | Path = "data") -> None:
         self._dir = Path(data_dir) / "youtube"
+        self._pending = self._dir / "pending"  # временная папка с TTL
+
+    @staticmethod
+    def _clamp_quality(q: int | None) -> int:
+        """Округляет качество до ближайшего допустимого значения ≤ запрошенного."""
+        if q is None:
+            return _DEFAULT_QUALITY
+        # Берём наибольшее допустимое значение, которое не превышает запрошенное
+        candidates = [v for v in _ALLOWED_QUALITIES if v <= q]
+        return max(candidates) if candidates else _ALLOWED_QUALITIES[0]
+
+    def _cleanup_pending(self) -> None:
+        """Удаляет файлы из pending старше TTL."""
+        if not self._pending.exists():
+            return
+        now = time.time()
+        for f in self._pending.iterdir():
+            try:
+                if now - f.stat().st_mtime > _YOUTUBE_TTL_SEC:
+                    if f.is_dir():
+                        shutil.rmtree(f, ignore_errors=True)
+                    else:
+                        f.unlink(missing_ok=True)
+            except OSError:
+                pass
 
     async def execute(self, task: BaseTask) -> ToolResult:
         url = getattr(task, "url", None) or ""
         channel_search = getattr(task, "channel_search", None)
         fmt = getattr(getattr(task, "format", None), "value", "mp4")
-        max_quality = getattr(task, "max_quality", None)
+        max_quality = self._clamp_quality(getattr(task, "max_quality", None))
         want_subs = getattr(task, "subtitles", False)
         meta_only = getattr(task, "metadata_only", False)
         want_thumb = getattr(task, "thumbnail", False)
         self._dir.mkdir(parents=True, exist_ok=True)
+        self._pending.mkdir(parents=True, exist_ok=True)
+        self._cleanup_pending()
 
         # Если задан поиск канала — найти последнее видео
         if channel_search and not url:
@@ -72,13 +106,14 @@ class YoutubeTool(Tool):
             ct = "image/jpeg" if tp.suffix.lower() in (".jpg", ".jpeg") else "image/webp"
             attachments.append(Attachment(filename=tp.name, path=str(tp), size=tp.stat().st_size, content_type=ct))
 
-        summary = f"Скачано: {title} ({fmt})"
+        summary = f"Скачано: {title} ({fmt}, до {max_quality}p)"
         if want_subs and sub_paths:
             summary += f", субтитры: {len(sub_paths)} файл(ов)"
         elif want_subs and not sub_paths:
             summary += "\nСубтитры недоступны (YouTube ограничил запросы с этого IP). Попробуйте позже или запросите субтитры отдельно."
         if thumb_path:
             summary += ", обложка приложена"
+        summary += f"\nФайл хранится {_YOUTUBE_TTL_SEC // 3600} ч, после чего удаляется автоматически."
         return ToolResult(
             success=True,
             summary=summary,
@@ -158,19 +193,19 @@ class YoutubeTool(Tool):
         }
 
     def _download(
-        self, url: str, fmt: str, max_quality: int | None, want_subs: bool, want_thumb: bool
+        self, url: str, fmt: str, max_quality: int, want_subs: bool, want_thumb: bool
     ) -> tuple[str, str, list[str], str | None]:
         import yt_dlp  # ленивый импорт
 
-        outtmpl = str(self._dir / "%(title)s.%(ext)s")
+        # Скачиваем в pending/ — файлы живут TTL и потом удаляются
+        outtmpl = str(self._pending / "%(title)s.%(ext)s")
         opts = self._base_opts(outtmpl)
 
         if fmt == "mp3":
             opts["format"] = "bestaudio/best"
             opts["postprocessors"] = [{"key": "FFmpegExtractAudio", "preferredcodec": "mp3"}]
         else:
-            height = f"[height<={max_quality}]" if max_quality else ""
-            opts["format"] = f"bestvideo{height}+bestaudio/best{height}"
+            opts["format"] = f"bestvideo[height<={max_quality}]+bestaudio/best[height<={max_quality}]/best[height<={max_quality}]"
 
         if want_thumb:
             opts["writethumbnail"] = True
@@ -186,7 +221,7 @@ class YoutubeTool(Tool):
         # Шаг 2: субтитры отдельным проходом, чтобы ошибка не убила весь результат
         sub_paths: list[str] = []
         if want_subs:
-            sub_paths = self._download_subs(url, outtmpl, title)
+            sub_paths = self._download_subs(url, title)
 
         thumb_path: str | None = None
         if want_thumb:
@@ -199,10 +234,11 @@ class YoutubeTool(Tool):
 
         return path, title, sub_paths, thumb_path
 
-    def _download_subs(self, url: str, outtmpl: str, title: str) -> list[str]:
+    def _download_subs(self, url: str, title: str) -> list[str]:
         """Скачивает субтитры отдельно; при 429/ошибке возвращает пустой список."""
         import yt_dlp  # ленивый импорт
 
+        outtmpl = str(self._pending / "%(title)s.%(ext)s")
         opts = self._base_opts(outtmpl)
         opts["skip_download"] = True
         opts["writesubtitles"] = True
@@ -218,9 +254,9 @@ class YoutubeTool(Tool):
             return []
 
         sub_paths: list[str] = []
-        base_dir = Path(outtmpl).parent
-        for candidate in base_dir.glob(f"*{title[:40]}*.srt"):
+        prefix = title[:40].replace("/", "_")
+        for candidate in self._pending.glob(f"*{prefix}*.srt"):
             sub_paths.append(str(candidate))
-        for candidate in base_dir.glob(f"*{title[:40]}*.vtt"):
+        for candidate in self._pending.glob(f"*{prefix}*.vtt"):
             sub_paths.append(str(candidate))
         return sub_paths

@@ -20,6 +20,7 @@ from .skills.chain import ChainPlanner, ChainRunner, SkillChain
 from .storage.repositories import Storage
 from .tools.email_tool import EmailSender
 from .tools.registry import ToolRegistry
+from .logs.mail_ring import MailRingLog
 from .utils.logging import get_logger
 from .workflow.engine import WorkflowEngine
 
@@ -79,6 +80,16 @@ _CHAIN_TASK_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Анализ писем / рекомендации
+_ANALYZE_RE = re.compile(
+    r"(анализ\s*писем|analyse?\s*mails?|разбор\s*запросов)",
+    re.IGNORECASE,
+)
+_RECOMMENDATIONS_RE = re.compile(
+    r"(рекомендаци[ия]|статус\s*агента|agent\s*status|recommendations?)",
+    re.IGNORECASE,
+)
+
 # Управление whitelist
 _WL_ADD_RE = re.compile(
     r"(добавь\s+в\s+whitelist|whitelist\s*add|добавь\s+доступ)\s*[:\-]?\s*(\S+@\S+)",
@@ -124,6 +135,7 @@ class Agent:
             self.skill_builder._router, self.settings.data_dir / "skills"
         )
         self._pending_chains: dict[str, SkillChain] = {}  # run_id -> chain (ожидают сохранения)
+        self.mail_ring = MailRingLog(self.settings.data_dir / "logs")
 
     async def process_mail(self, mail: IncomingMail) -> None:
         """Полный цикл обработки одного письма."""
@@ -197,6 +209,15 @@ class Agent:
             await self._handle_llm_config_command(mail)
             return
 
+        # Анализ писем + рекомендации
+        if _ANALYZE_RE.search(mail.body):
+            await self._handle_analyze_mails(mail)
+            return
+
+        if _RECOMMENDATIONS_RE.search(mail.body):
+            self._handle_show_recommendations(mail)
+            return
+
         # Управление whitelist
         wl_add_m = _WL_ADD_RE.search(mail.body)
         if wl_add_m:
@@ -267,6 +288,7 @@ class Agent:
             data=result.get("data", {}),
             metrics={"execution_time": round(elapsed, 2)},
         )
+        self.mail_ring.push(mail, task_type=task.type.value, status=status)
         self._reply_result(mail, task.type.value, status, result, elapsed)
 
     async def _handle_update_sandbox(self, mail: IncomingMail) -> None:
@@ -585,6 +607,105 @@ class Agent:
             in_reply_to=mail.message_id,
         ))
 
+    async def _handle_analyze_mails(self, mail: IncomingMail) -> None:
+        """LLM анализирует кольцевой лог писем и генерирует рекомендации."""
+        ring = self.mail_ring.get_ring()
+        if not ring:
+            self._safe_send(OutgoingMail(
+                to=mail.sender,
+                subject="APIAt: анализ писем",
+                body="Лог писем пуст — нет данных для анализа. Начните пользоваться агентом, затем запросите анализ снова.",
+                in_reply_to=mail.message_id,
+            ))
+            return
+
+        # Формируем сводку для LLM
+        entries_text = "\n".join(
+            f"[{e['ts'][:16]}] {e['task_type'] or '?'} | {e['status'] or '?'} | "
+            f"от: {e['sender']} | тема: {e['subject']} | "
+            f"превью: {e['body_preview'][:100]}"
+            for e in ring
+        )
+        prompt = (
+            "Ты — аналитик персонального AI-агента APIAt.\n\n"
+            "## Контекст и роль сервиса\n"
+            "APIAt — персональный интернет-агент, работающий исключительно через канал "
+            "электронной почты (IMAP/SMTP). Его ключевая роль: обход жёстких сетевых "
+            "блокировок и цензуры — пользователь находится в зоне ограниченного доступа "
+            "к интернету (корпоративные фильтры, государственные блокировки, VPN-запреты) "
+            "и общается с агентом только через email, который проходит эти барьеры. "
+            "Агент действует как 'живой человек по ту сторону стены': ищет информацию, "
+            "скачивает файлы, смотрит видео, читает заблокированные сайты — и возвращает "
+            "результат письмом. Переписка может анализироваться третьими лицами, поэтому "
+            "пользователи склонны использовать эвфемизмы и косвенные формулировки.\n\n"
+            "## Возможности агента сейчас\n"
+            "Поиск (Google News RSS / LLM-дайджест), скачивание файлов, YouTube (видео/аудио/"
+            "субтитры/обложка/метаданные), браузер Chromium с сохранением сессий, "
+            "архивирование вложений, самообучение через Docker-sandbox (создание навыков), "
+            "цепочки навыков, управление whitelist, адаптивный polling.\n\n"
+            f"## Лог последних {len(ring)} запросов\n"
+            f"{entries_text}\n\n"
+            "## Задача анализа\n"
+            "1. Выяви повторяющиеся паттерны — что чаще всего нужно пользователям "
+            "с учётом контекста обхода блокировок.\n"
+            "2. Определи скрытые потребности: какие запросы могут быть эвфемизмами "
+            "реальных задач (например, 'найди новости' может значить 'дай мне то, "
+            "что заблокировано у меня').\n"
+            "3. Предложи конкретные новые навыки (skills) для самообучения агента — "
+            "с коротким описанием что делает каждый навык.\n"
+            "4. Укажи провалившиеся задачи (FAILED) и их вероятные причины с учётом "
+            "специфики VPS-сервера (блокировки по IP, rate-limit YouTube/Google и т.д.).\n"
+            "5. Дай приоритетный список улучшений сервиса.\n"
+            "Ответ — структурированный текст на русском, конкретный, без воды."
+        )
+
+        self._safe_send(OutgoingMail(
+            to=mail.sender,
+            subject="APIAt: анализ писем — запущен",
+            body=f"Анализирую {len(ring)} последних писем, подождите...",
+            in_reply_to=mail.message_id,
+        ))
+
+        try:
+            result = await self.parser.router.run_agent(
+                lambda model: __import__("pydantic_ai", fromlist=["Agent"]).Agent(
+                    model=model, output_type=str,
+                    system_prompt=(
+                        "Ты — аналитик персонального AI-агента APIAt, который помогает людям "
+                        "обходить интернет-блокировки через канал электронной почты. "
+                        "Пользователи пишут письма агенту из зон с ограниченным доступом к сети. "
+                        "Твоя задача — анализировать запросы, выявлять паттерны и скрытые потребности, "
+                        "предлагать улучшения. Отвечай только на русском, структурированно и конкретно."
+                    )
+                ),
+                prompt,
+            )
+            rec_text = (
+                result.output if hasattr(result, "output") else
+                result.data if hasattr(result, "data") else
+                str(result)
+            )
+        except Exception as exc:  # noqa: BLE001
+            rec_text = f"Ошибка LLM-анализа: {exc}"
+
+        self.mail_ring.save_recommendation(rec_text)
+        self._safe_send(OutgoingMail(
+            to=mail.sender,
+            subject="APIAt: рекомендации по анализу писем",
+            body=rec_text,
+            in_reply_to=mail.message_id,
+        ))
+
+    def _handle_show_recommendations(self, mail: IncomingMail) -> None:
+        """Показывает сохранённые рекомендации."""
+        body = self.mail_ring.format_recommendations()
+        self._safe_send(OutgoingMail(
+            to=mail.sender,
+            subject="APIAt: рекомендации",
+            body=body,
+            in_reply_to=mail.message_id,
+        ))
+
     def _effective_whitelist(self) -> list[str]:
         """Объединяет whitelist из .env и динамические записи из БД, учитывает исключения."""
         base = [a.lower() for a in self.settings.whitelist]
@@ -700,6 +821,13 @@ class Agent:
             "  цепочка: <задача>                — LLM строит план из навыков",
             "  сохрани цепочку <имя>            — сохранить последнюю цепочку",
             "  выполни цепочку <имя>: key=val  — запустить сохранённую цепочку",
+            "",
+            "## Анализ и рекомендации",
+            "  анализ писем   — LLM анализирует последние 50 писем,",
+            "                   выявляет паттерны, предлагает новые навыки",
+            "                   и улучшения; результат сохраняется",
+            "  рекомендации   — показать последние сохранённые рекомендации",
+            "  статус агента  — то же самое",
             "",
             "## Управление доступом (whitelist)",
             "  покажи whitelist                     — список разрешённых адресов",

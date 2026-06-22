@@ -254,10 +254,9 @@ class Agent:
             ))
             return
 
-        # Перезапуск сервиса
-        rc, out = _run(["systemctl", "restart", "apiat"])
-        lines.append(f"systemctl restart: {'OK' if rc == 0 else 'ОШИБКА'}\n{out}")
-
+        # Сначала отправляем письмо, затем перезапускаем через 5 сек в фоне.
+        # Если делать наоборот — systemctl restart убивает процесс до отправки.
+        lines.append("Перезапуск сервиса через 5 сек...")
         logger.info("Самообновление: %s -> %s", old_head[:12], new_head[:12])
         self._safe_send(OutgoingMail(
             to=mail.sender,
@@ -265,6 +264,12 @@ class Agent:
             body="\n".join(lines),
             in_reply_to=mail.message_id,
         ))
+
+        # Запускаем restart в фоне после задержки — письмо уже ушло
+        subprocess.Popen(
+            ["bash", "-c", "sleep 5 && systemctl restart apiat"],
+            start_new_session=True,
+        )
 
     async def _handle_learn_command(self, mail: IncomingMail, user_prompt: str) -> None:
         """Запускает цикл самообучения: генерация → ревью → sandbox → валидация."""

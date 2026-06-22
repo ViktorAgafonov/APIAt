@@ -230,14 +230,17 @@ class Agent:
 
         lines.append(f"Dockerfile: {dockerfile.name}")
         r = subprocess.run(
-            ["docker", "build", "-f", str(dockerfile), "-t", "apiat-sandbox:latest",
+            ["docker", "build", "--no-cache=false", "-q",
+             "-f", str(dockerfile), "-t", "apiat-sandbox:latest",
              str(dockerfile.parent)],
             capture_output=True, text=True, timeout=300,
         )
-        out = (r.stdout + r.stderr).strip()
         lines.append(f"docker build: {'OK' if r.returncode == 0 else 'ОШИБКА'}")
-        if out:
-            lines.append(out[-800:])
+        if r.returncode == 0:
+            image_id = r.stdout.strip().replace("sha256:", "")[:12]
+            lines.append(f"Image ID: {image_id}")
+        else:
+            lines.append(r.stderr.strip()[-800:])
 
         self._safe_send(OutgoingMail(
             to=mail.sender,

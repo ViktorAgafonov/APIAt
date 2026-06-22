@@ -45,11 +45,13 @@ class YoutubeTask(BaseTask):
     """Скачивание видео/аудио через yt-dlp."""
 
     type: Literal[TaskType.YOUTUBE] = TaskType.YOUTUBE
-    url: str
+    url: str = ""
     format: YoutubeFormat = YoutubeFormat.MP4
     max_quality: int | None = None  # ограничение по высоте, напр. 720
     subtitles: bool = False          # скачать субтитры
     metadata_only: bool = False      # только метаданные без скачивания
+    thumbnail: bool = False          # скачать обложку (thumbnail)
+    channel_search: str | None = None  # поиск канала по имени (если нет точного URL)
 
 
 class BrowserTask(BaseTask):

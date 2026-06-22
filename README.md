@@ -95,7 +95,7 @@ cd /opt/apiat && git pull origin main && systemctl restart apiat
 | `цепочка: <задача>` / `chain: <задача>` | LLM строит план из закреплённых навыков и выполняет цепочку |
 | `сохрани цепочку <имя>` / `save chain <имя>` | Закрепить выполненную цепочку как `.chain.json` |
 | `выполни цепочку <имя>: key=val` / `run chain <имя>: key=val` | Запустить сохранённую цепочку с параметрами |
-| `подтверди навык <имя>` / `confirm skill <имя>` | Переместить навык из `pending/` в `skills/` |
+| `закрепи навык <имя>` / `confirm skill <имя>` | Переместить навык из `pending/` в `skills/` |
 | `переключи llm` | Показать статус LLM-провайдеров и diff с резервной копией `.env` |
 | `переключи llm` + строки `KEY=value` | Применить новые LLM-параметры, проверить пробным запросом; при ошибке — откат |
 
@@ -109,7 +109,7 @@ cd /opt/apiat && git pull origin main && systemctl restart apiat
   → LLM валидирует: вывод соответствует заданию?
   → Письмо оператору: вывод навыка + инструкция подтвердить
 
-подтверди навык <имя>
+закрепи навык <имя>
   → data/skills/pending/<имя>.py → data/skills/<имя>.py
 ```
 
@@ -155,7 +155,7 @@ Stdout шага доступен следующему в params как `{prev_sk
 1. **Один файл** — весь код в одном `.py`, никаких относительных импортов.
 2. **Имя файла** — `snake_case`: `server_status.py`, `parse_page.py`, `split_archive.py`.
 3. **Вывод** — только через `print()` в stdout.
-4. **Формат вывода** — HTML: теги `<h2>`, `<p>`, `<ul>`, `<li>`, `<b>`. Агент вставит в тело письма как есть.
+4. **Формат вывода** — plain text, удобно читаемый: разделы через пустую строку, значения через `: `.
 5. **Зависимости** — только `stdlib` + `psutil` + `requests` (все установлены). Без `pip install`.
 6. **Timeout** — код должен завершиться за время из метаданных (по умолчанию 30 сек).
 
@@ -189,12 +189,11 @@ mem = psutil.virtual_memory()
 disk = psutil.disk_usage("/")
 uptime_h = round(float(open("/proc/uptime").read().split()[0]) / 3600, 1)
 
-print("<h2>Статус сервера</h2><ul>")
-print(f"<li><b>Время:</b> {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</li>")
-print(f"<li><b>Uptime:</b> {uptime_h} ч</li>")
-print(f"<li><b>RAM:</b> {mem.used//1024**2}/{mem.total//1024**2} MB ({mem.percent}%)</li>")
-print(f"<li><b>Disk:</b> {disk.used//1024**3}/{disk.total//1024**3} GB ({disk.percent}%)</li>")
-print("</ul>")
+print("=== Статус сервера ===")
+print(f"Время  : {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+print(f"Uptime : {uptime_h} ч")
+print(f"RAM    : {mem.used//1024**2}/{mem.total//1024**2} MB ({mem.percent}%)")
+print(f"Disk   : {disk.used//1024**3}/{disk.total//1024**3} GB ({disk.percent}%)")
 ```
 
 **Шаблон: сетевой (HTTP-запрос / парсинг)**
@@ -208,9 +207,8 @@ url = "https://example.com/api/status"
 r = requests.get(url, timeout=10)
 data = r.json()
 
-print(f"<h2>Результат запроса</h2>")
-print(f"<p><b>Статус:</b> {r.status_code}</p>")
-print(f"<p>{data}</p>")
+print(f"Статус: {r.status_code}")
+print(f"Ответ: {data}")
 ```
 
 **Шаблон: storage (работа с файлами)**
@@ -229,9 +227,9 @@ with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as zf:
         if f != "archive.zip":
             zf.write(f"/data/{f}", f)
 
-print(f"<h2>Архив создан</h2>")
-print(f"<p>Упакованных файлов: {len(files)}</p>")
-print(f"<p>Результат: /data/archive.zip ({os.path.getsize(out)//1024} KB)</p>")
+print(f"Архив создан: /data/archive.zip")
+print(f"Файлов упаковано: {len(files)}")
+print(f"Размер: {os.path.getsize(out)//1024} KB")
 ```
 
 **Как добавить вручную:**
@@ -242,7 +240,7 @@ cp my_skill.py /opt/apiat/data/skills/my_skill.py
 
 # Через pending (с подтверждением)
 cp my_skill.py /opt/apiat/data/skills/pending/my_skill.py
-# Затем письмо: подтверди навык my_skill
+# Затем письмо: закрепи навык my_skill
 ```
 
 **Проверка на сервере:**

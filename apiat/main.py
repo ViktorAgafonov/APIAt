@@ -42,9 +42,9 @@ _LEARN_CMD_RE = re.compile(
     re.IGNORECASE,
 )
 
-# Подтверждение навыка: "подтверди навык <имя>"
+# Закрепление навыка: "закрепи навык <имя>" (обратная совместимость: подтверди навык)
 _CONFIRM_SKILL_RE = re.compile(
-    r"(подтверди\s*навык|confirm\s*skill)\s*[:\-]?\s*(\S+)",
+    r"(закрепи\s*навык|подтверди\s*навык|confirm\s*skill)\s*[:\-]?\s*(\S+)",
     re.IGNORECASE,
 )
 
@@ -300,7 +300,7 @@ class Agent:
             f"Шаги выполнения:\n{steps_text}\n\n"
             f"--- Вывод навыка ---\n{result.sandbox_output}\n\n"
             f"Если результат вас устраивает, ответьте:\n"
-            f"подтверди навык {result.skill_name}"
+            f"закрепи навык {result.skill_name}"
         )
         self._safe_send(OutgoingMail(
             to=mail.sender,

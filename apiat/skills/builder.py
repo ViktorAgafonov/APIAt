@@ -21,7 +21,7 @@ _ENV_CONTEXT_BASE = """
 - Python 3.12, Linux (Ubuntu 24.04), VPS сервер
 - Доступные модули: stdlib + psutil + requests (все установлены)
 - Результат должен быть напечатан через print() в stdout
-- Ответ пользователю — в формате HTML (теги <h2>, <p>, <ul>, <li>, <b>)
+- Ответ пользователю — plain text, удобно читаемый: разделы через пустую строку, выравнивание через пробелы, значения через :
 - Код должен быть полностью самодостаточным, в одном файле, без внешних import кроме stdlib/psutil/requests
 - Первые строки кода — метаданные лимитов sandbox (# skill:key=value):
     # skill:profile=isolated|network|storage
@@ -65,6 +65,13 @@ _REVIEW_PROMPT = """\
 Код запускается в изолированном Docker sandbox без сети и с ограничением ресурсов — это безопасно.
 
 Дай ответ строго "да" или "нет". Если "нет" — одна строка причины.
+"""
+
+_NAME_PROMPT = """\
+Придумай короткое английское имя файла Python-навыка в формате snake_case, 2-4 слова, максимум 30 символов.
+Описание навыка: {user_prompt}
+Верни ТОЛЬКО имя файла без расширения .py, без пояснений.
+Примеры: server_status, disk_report, ram_usage, parse_url
 """
 
 _VALIDATE_PROMPT = """\
@@ -156,7 +163,7 @@ class SkillBuilder:
         result.steps.append("   Валидация: соответствует заданию")
 
         # Шаг 5: сохранение в pending
-        skill_name = _slug(user_prompt)
+        skill_name = await self._generate_name(user_prompt)
         pending_path = self._pending_dir / f"{skill_name}.py"
         pending_path.write_text(code, encoding="utf-8")
         result.steps.append(f"5. Сохранено в pending: {pending_path.name}")
@@ -205,7 +212,7 @@ class SkillBuilder:
             lines.append(f"⏳ Ожидают подтверждения ({len(pending)}):")
             for name in pending:
                 lines.append(f"  • {name}")
-                lines.append(f"    → чтобы закрепить: подтверди навык {name}")
+                lines.append(f"    → чтобы закрепить: закрепи навык {name}")
         else:
             lines.append("⏳ Ожидают подтверждения: нет")
 
@@ -214,6 +221,12 @@ class SkillBuilder:
         lines.append("  самообучись: <описание навыка>")
 
         return "\n".join(lines)
+
+    async def _generate_name(self, user_prompt: str) -> str:
+        raw = await self._router.complete(_NAME_PROMPT.format(user_prompt=user_prompt))
+        name = raw.strip().splitlines()[0].strip().replace(".py", "")
+        name = re.sub(r"[^\w]", "_", name.lower()).strip("_")[:30]
+        return name or _slug(user_prompt)
 
     async def _generate_code(self, user_prompt: str) -> str:
         default_cfg = SkillConfig()

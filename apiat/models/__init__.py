@@ -6,10 +6,12 @@ from .metrics import TaskMetrics
 from .tasks import (
     AnyTask,
     BrowserTask,
+    ChainTask,
     DownloadTask,
     FileTask,
     NewsTask,
     SearchTask,
+    SkillTask,
     YoutubeFormat,
     YoutubeTask,
 )
@@ -30,4 +32,6 @@ __all__ = [
     "YoutubeFormat",
     "BrowserTask",
     "FileTask",
+    "SkillTask",
+    "ChainTask",
 ]

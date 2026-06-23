@@ -85,9 +85,20 @@ class YoutubeTool(Tool):
             path, title, sub_paths, thumb_path = self._download(url, fmt, max_quality, want_subs, want_thumb)
         except Exception as exc:  # noqa: BLE001
             err = str(exc)
-            # Упрощаем сообщение об ошибке yt-dlp
-            if "404" in err or "Unable to download" in err:
-                hint = f"\nПопробуйте указать точный URL канала или видео."
+            # При 429 на видео — пробуем только метаданные + обложку
+            if "429" in err or "Too Many Requests" in err:
+                logger.warning("429 при скачивании видео, переключаемся на метаданные")
+                try:
+                    result = self._get_metadata(url, want_thumb)
+                    result = result.model_copy(update={
+                        "summary": result.summary + "\n\n⚠️ Видео не скачано (YouTube rate-limit по IP). "
+                                   "Субтитры и обложка могут быть приложены из метаданных.",
+                    })
+                    return result
+                except Exception:  # noqa: BLE001
+                    pass
+            if "404" in err or "Unable to download" in err or "429" in err:
+                hint = "\nYouTube временно ограничил запросы с IP сервера. Попробуйте через 10-15 минут."
             else:
                 hint = ""
             return ToolResult(success=False, error=f"Ошибка yt-dlp: {err}{hint}")
@@ -156,10 +167,15 @@ class YoutubeTool(Tool):
     def _get_metadata(self, url: str, want_thumb: bool = False) -> ToolResult:
         import yt_dlp  # ленивый импорт
 
-        opts: dict = {"quiet": True}
+        outtmpl = str(self._pending / "%(title)s.%(ext)s")
+        opts: dict = {
+            "quiet": True,
+            "http_headers": {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36"},
+            "sleep_interval": 2,
+        }
         if want_thumb:
             opts["writethumbnail"] = True
-            opts["outtmpl"] = str(self._dir / "%(title)s.%(ext)s")
+            opts["outtmpl"] = outtmpl
             opts["skip_download"] = True
         with yt_dlp.YoutubeDL(opts) as ydl:
             info = ydl.extract_info(url, download=want_thumb)
@@ -174,7 +190,7 @@ class YoutubeTool(Tool):
         attachments = []
         if want_thumb:
             for ext in (".jpg", ".jpeg", ".webp", ".png"):
-                tp = Path(self._dir / f"{info.get('title', 'thumb')}{ext}")
+                tp = self._pending / f"{info.get('title', 'thumb')}{ext}"
                 if tp.exists():
                     ct = "image/jpeg" if ext in (".jpg", ".jpeg") else f"image/{ext[1:]}"
                     attachments.append(Attachment(filename=tp.name, path=str(tp), size=tp.stat().st_size, content_type=ct))
@@ -187,9 +203,11 @@ class YoutubeTool(Tool):
             "outtmpl": outtmpl,
             "quiet": True,
             "noprogress": True,
-            "sleep_interval": 2,       # пауза между запросами — снижает 429
-            "max_sleep_interval": 5,
+            "sleep_interval": 3,
+            "max_sleep_interval": 8,
             "ignoreerrors": False,
+            "extractor_args": {"youtube": {"skip": ["hls", "dash"]}},
+            "http_headers": {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36"},
         }
 
     def _download(
@@ -243,8 +261,9 @@ class YoutubeTool(Tool):
         opts["skip_download"] = True
         opts["writesubtitles"] = True
         opts["writeautomaticsub"] = True
-        opts["subtitleslangs"] = ["ru", "en"]
+        opts["subtitleslangs"] = ["ru", "en", "ru-RU"]
         opts["subtitlesformat"] = "srt"
+        opts["ignoreerrors"] = True   # не падать при 429 на субтитрах
 
         try:
             with yt_dlp.YoutubeDL(opts) as ydl:

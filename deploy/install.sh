@@ -23,6 +23,7 @@ python3 -m venv "$DIR/.venv"
 "$DIR/.venv/bin/pip" install -r "$DIR/requirements.txt" -q
 "$DIR/.venv/bin/pip" install --break-system-packages youtube-transcript-api -q 2>/dev/null || \
 "$DIR/.venv/bin/pip" install youtube-transcript-api -q
+"$DIR/.venv/bin/playwright" install chromium -q
 
 echo "=== [4/5] .env — секреты ==="
 if [ ! -f "$DIR/.env" ]; then

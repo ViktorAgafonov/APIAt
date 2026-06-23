@@ -43,9 +43,16 @@ class EmailSender:
         msg = EmailMessage()
         msg["From"] = self._s.smtp_from or self._s.smtp_user
         msg["To"] = mail.to
-        msg["Subject"] = mail.subject
+        # Re: prefix чтобы клиент показывал как ответ в теме
+        subject = mail.subject
+        if mail.in_reply_to and not subject.lower().startswith("re:"):
+            subject = f"Re: {subject}"
+        msg["Subject"] = subject
         if mail.in_reply_to:
             msg["In-Reply-To"] = mail.in_reply_to
+            # References = предыдущие ID + текущий In-Reply-To — обязателен для треда (RFC 2822)
+            refs = f"{mail.references} {mail.in_reply_to}".strip() if mail.references else mail.in_reply_to
+            msg["References"] = refs
         msg.set_content(mail.body)
 
         for att in mail.attachments:

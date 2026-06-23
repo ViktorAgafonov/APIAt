@@ -73,6 +73,7 @@ class ImapClient:
         message_id = (msg.get("Message-ID") or "").strip()
         sender = _decode(msg.get("From"))
         subject = _decode(msg.get("Subject"))
+        references = (msg.get("References") or "").strip()
         body, attachments = self._extract_parts(msg)
         return IncomingMail(
             message_id=message_id or f"no-id-{hash(subject + sender)}",
@@ -80,6 +81,7 @@ class ImapClient:
             subject=subject,
             body=body,
             attachments=attachments,
+            references=references,
         )
 
     def _extract_parts(self, msg: Message) -> tuple[str, list[Attachment]]:

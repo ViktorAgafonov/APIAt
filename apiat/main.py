@@ -136,9 +136,11 @@ class Agent:
         )
         self._pending_chains: dict[str, SkillChain] = {}  # run_id -> chain (ожидают сохранения)
         self.mail_ring = MailRingLog(self.settings.data_dir / "logs")
+        self._current_mail: IncomingMail | None = None  # для thread-заголовков в _safe_send
 
     async def process_mail(self, mail: IncomingMail) -> None:
         """Полный цикл обработки одного письма."""
+        self._current_mail = mail
         # Защита от повторной обработки
         if self.storage.is_mail_processed(mail.message_id):
             logger.info("Письмо %s уже обработано, пропуск", mail.message_id)
@@ -960,17 +962,29 @@ class Agent:
             )
         )
 
+    def _reply(self, mail: IncomingMail, subject: str, body: str,
+               attachments: list | None = None) -> None:
+        """Отправить ответное письмо с правильными thread-заголовками."""
+        self._safe_send(OutgoingMail(
+            to=mail.sender,
+            subject=subject,
+            body=body,
+            attachments=attachments or [],
+            in_reply_to=mail.message_id,
+            references=mail.references,
+        ))
+
     def _reply_error(self, mail: IncomingMail, message: str, task_name: str = "unknown") -> None:
-        self._safe_send(
-            OutgoingMail(
-                to=mail.sender,
-                subject=f"APIAt: {task_name} [FAILED]",
-                body=f"Task: {task_name}\nStatus: FAILED\n\n{message}",
-                in_reply_to=mail.message_id,
-            )
+        self._reply(
+            mail,
+            subject=f"APIAt: {task_name} [FAILED]",
+            body=f"Task: {task_name}\nStatus: FAILED\n\n{message}",
         )
 
-    def _safe_send(self, mail: OutgoingMail) -> None:
+    def _safe_send(self, mail: OutgoingMail, reply_to: IncomingMail | None = None) -> None:
+        src = reply_to or self._current_mail
+        if src and mail.in_reply_to and not mail.references:
+            mail = mail.model_copy(update={"references": src.references})
         try:
             self.sender.send(mail)
         except Exception:  # noqa: BLE001

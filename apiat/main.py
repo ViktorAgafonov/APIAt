@@ -56,6 +56,12 @@ _CONFIRM_SKILL_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Явный запуск навыка по имени: "запусти навык <имя>" / "run skill <имя>"
+_RUN_SKILL_RE = re.compile(
+    r"(запусти\s*навык|выполни\s*навык|run\s*skill)\s*[:\-]?\s*(\S+)",
+    re.IGNORECASE,
+)
+
 # Список навыков
 _LIST_SKILLS_RE = re.compile(
     r"(список\s*навыков|list\s*skills?|show\s*skills?)",
@@ -244,6 +250,18 @@ class Agent:
         # Помощь
         if _HELP_RE.search(mail.body):
             self._handle_help(mail)
+            return
+
+        # Явный запуск навыка: "запусти навык <имя>"
+        run_skill_m = _RUN_SKILL_RE.search(mail.body)
+        if run_skill_m:
+            await self._handle_run_skill(mail, run_skill_m.group(2).strip())
+            return
+
+        # Нечёткое совпадение с именем закреплённого навыка
+        matched_skill = self._match_skill(mail.body)
+        if matched_skill:
+            await self._handle_run_skill(mail, matched_skill)
             return
 
         started = time.monotonic()
@@ -812,10 +830,12 @@ class Agent:
             "  переключи llm           — статус LLM-провайдеров",
             "  переключи llm + KEY=..  — сменить параметры LLM",
             "",
-            "## Самообучение",
+            "## Самообучение и навыки",
             "  самообучись: <описание>         — создать навык: LLM → ревью → sandbox",
             "  закрепи навык <имя>             — перенести из pending в skills",
             "  список навыков                  — показать все навыки",
+            "  запусти навык <имя>             — явный запуск по имени",
+            "  <имя навыка>                    — нечёткое совпадение (напр. 'статус сервера'→server_status)",
             "",
             "## Цепочки навыков",
             "  цепочка: <задача>               — LLM строит план из навыков",
@@ -961,6 +981,50 @@ class Agent:
                 in_reply_to=mail.message_id,
             )
         )
+
+    def _match_skill(self, text: str) -> str:
+        """Находит имя закреплённого навыка по точному или нечёткому совпадению с текстом письма."""
+        skills = self.skill_builder.list_confirmed()
+        if not skills:
+            return ""
+        # Нормализуем: пробелы→_, строчные, убираем знаки
+        normalized = re.sub(r"[^\w]", "_", text.strip().lower()).strip("_")
+        # 1. Точное совпадение имени навыка в тексте
+        for skill in skills:
+            if skill in normalized or normalized in skill:
+                return skill
+        # 2. Все слова из имени навыка присутствуют в тексте
+        text_words = set(re.split(r"[\W_]+", text.lower()))
+        for skill in skills:
+            skill_words = set(w for w in re.split(r"_+", skill) if len(w) > 2)
+            if skill_words and skill_words.issubset(text_words):
+                return skill
+        return ""
+
+    async def _handle_run_skill(self, mail: IncomingMail, skill_name: str) -> None:
+        """Запускает закреплённый навык в Docker sandbox и отправляет результат."""
+        from .skills.sandbox import DockerSandbox, SkillConfig
+        skill_path = self.settings.data_dir / "skills" / f"{skill_name}.py"
+        if not skill_path.exists():
+            self._reply(mail, f"APIAt: навык '{skill_name}' не найден",
+                        f"Файл навыка не найден: {skill_path}")
+            return
+        code = skill_path.read_text(encoding="utf-8")
+        cfg = SkillConfig.from_code(code)
+        sandbox = DockerSandbox(data_dir=self.settings.data_dir)
+        started = time.monotonic()
+        result = sandbox.run(code, cfg)
+        elapsed = round(time.monotonic() - started, 1)
+        if result.success:
+            body = f"Навык: {skill_name}\nВремя: {elapsed} сек\n\n{result.stdout}"
+            subject = f"APIAt: {skill_name} [OK]"
+        else:
+            body = f"Навык: {skill_name}\nВремя: {elapsed} сек\n\nОшибка:\n{result.stderr}"
+            subject = f"APIAt: {skill_name} [FAILED]"
+        self._reply(mail, subject, body)
+        self.mail_ring.push(mail, task_type=f"skill:{skill_name}",
+                            status="COMPLETED" if result.success else "FAILED",
+                            secret_token=self.settings.secret_token)
 
     def _reply(self, mail: IncomingMail, subject: str, body: str,
                attachments: list | None = None) -> None:

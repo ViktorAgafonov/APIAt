@@ -30,25 +30,33 @@ Mail Gateway -> Intent Parser (LlmRouter/PydanticAI) -> Typed Task
 - `skills/` — система навыков: генерация, ревью, Docker sandbox, подтверждение.
 - `utils/` — логирование, файловый кэш (tmpfs/disk), TTL-очистка.
 
-## Установка
+## Быстрый старт на VPS
+
+```bash
+# 1 — установка (клон + venv + зависимости + systemd enable)
+bash <(curl -fsSL https://raw.githubusercontent.com/ViktorAgafonov/APIAt/main/deploy/install.sh)
+
+# 2 — заполнить секреты (IMAP, SMTP, LLM, токен доступа)
+nano /opt/apiat/.env
+
+# 3 — запустить
+systemctl start apiat
+
+# 4 — проверить
+journalctl -u apiat -f
+```
+
+Подробнее: [`docs/deployment.md`](docs/deployment.md)
+
+## Локальная разработка
 
 ```bash
 python -m venv .venv
 source .venv/bin/activate        # Linux/macOS
 # .\.venv\Scripts\Activate.ps1  # Windows PowerShell
 pip install -r requirements.txt
-playwright install chromium
-cp .env.example .env             # затем заполнить значения
-```
-
-## Запуск
-
-```bash
-# Однократная обработка (cron / one-shot)
-python -m apiat.cli --once
-
-# Демон с периодическим опросом IMAP
-python -m apiat.cli --daemon
+cp .env.example .env             # заполнить значения
+python -m apiat.cli --once       # один проход для проверки
 ```
 
 ## Smoke-тесты (проверка подключений)

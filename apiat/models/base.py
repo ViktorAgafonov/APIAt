@@ -29,6 +29,8 @@ class TaskType(str, Enum):
     BROWSER = "browser"
     NEWS = "news"
     FILE = "file"
+    SKILL = "skill"
+    CHAIN = "chain"
 
 
 def _now() -> datetime:

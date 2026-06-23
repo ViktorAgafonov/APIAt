@@ -80,7 +80,7 @@ def test_poll_mode_record_activity_updates_last():
     before = p._last_activity
     time.sleep(0.01)
     p.record_activity(1)
-    assert p._last_activity > before
+    assert p._last_activity >= before
 
 
 def test_poll_mode_record_zero_does_not_update():

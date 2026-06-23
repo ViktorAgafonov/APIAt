@@ -71,8 +71,24 @@ class FileTask(BaseTask):
     input_attachments: list[str] = Field(default_factory=list)
 
 
+class SkillTask(BaseTask):
+    """Запуск закреплённого навыка по имени."""
+
+    type: Literal[TaskType.SKILL] = TaskType.SKILL
+    skill_name: str
+    params: dict = Field(default_factory=dict)
+
+
+class ChainTask(BaseTask):
+    """Запуск сохранённой цепочки навыков по имени."""
+
+    type: Literal[TaskType.CHAIN] = TaskType.CHAIN
+    chain_name: str
+    params: dict = Field(default_factory=dict)
+
+
 # Дискриминируемое объединение для типобезопасного парсинга
 AnyTask = Annotated[
-    Union[SearchTask, NewsTask, DownloadTask, YoutubeTask, BrowserTask, FileTask],
+    Union[SearchTask, NewsTask, DownloadTask, YoutubeTask, BrowserTask, FileTask, SkillTask, ChainTask],
     Field(discriminator="type"),
 ]

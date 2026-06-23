@@ -258,8 +258,8 @@ class Agent:
             await self._handle_run_skill(mail, run_skill_m.group(2).strip())
             return
 
-        # Нечёткое совпадение с именем закреплённого навыка (точно + LLM)
-        matched_skill = await self._match_skill(mail.body)
+        # Нечёткое совпадение с именем закреплённого навыка (точно, без LLM)
+        matched_skill = self._match_skill(mail.body)
         if matched_skill:
             await self._handle_run_skill(mail, matched_skill)
             return
@@ -267,10 +267,23 @@ class Agent:
         started = time.monotonic()
 
         try:
-            task = await self.parser.parse(mail)
+            task = await self.parser.parse(
+                mail,
+                skills=self.skill_builder.list_confirmed(),
+                chains=self.chain_runner.list_chains(),
+            )
             # Прокидываем пути вложений в задачу если тип поддерживает
             if mail.attachments and hasattr(task, "input_attachments"):
                 task.input_attachments = [a.path for a in mail.attachments if a.path]
+
+            # LLM решил, что нужно запустить навык/цепочку — выполняем напрямую
+            if task.type == TaskType.SKILL:
+                await self._handle_run_skill(mail, task.skill_name)
+                return
+            if task.type == TaskType.CHAIN:
+                await self._handle_run_chain(mail, task.chain_name, task.params)
+                return
+
         except LlmAllProvidersFailedError as exc:
             logger.error("Все LLM-провайдеры недоступны: %s", exc)
             self.mail_ring.push(mail, task_type=None, status="FAILED:llm_unavailable", secret_token=self.settings.secret_token)
@@ -982,31 +995,15 @@ class Agent:
             )
         )
 
-    async def _match_skill(self, text: str) -> str:
-        """Находит имя закреплённого навыка: сначала точно, потом через LLM."""
+    def _match_skill(self, text: str) -> str:
+        """Точное/частичное совпадение имени навыка в тексте (быстро, без LLM)."""
         skills = self.skill_builder.list_confirmed()
         if not skills:
             return ""
-        # 1. Точное/частичное совпадение (быстро, без LLM)
         normalized = re.sub(r"[^\w]", "_", text.strip().lower()).strip("_")
         for skill in skills:
             if skill in normalized or normalized in skill:
                 return skill
-        # 2. LLM выбирает подходящий навык из списка
-        skills_list = ", ".join(skills)
-        prompt = (
-            f"Доступные навыки: {skills_list}\n\n"
-            f"Запрос пользователя: {text[:300]}\n\n"
-            f"Если запрос явно подходит под один из навыков — ответь ТОЛЬКО именем навыка из списка. "
-            f"Если ни один не подходит — ответь NONE."
-        )
-        try:
-            answer = await self.parser.router.complete(prompt)
-            answer = answer.strip().splitlines()[0].strip()
-            if answer in skills:
-                return answer
-        except Exception:  # noqa: BLE001
-            pass
         return ""
 
     async def _handle_run_skill(self, mail: IncomingMail, skill_name: str) -> None:

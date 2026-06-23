@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import shutil
 import time
 from pathlib import Path
@@ -9,6 +10,16 @@ from pathlib import Path
 from ..models.base import BaseTask
 from ..models.email import Attachment
 from .base import Tool, ToolResult
+
+
+def _fmt_srt_time(seconds: float) -> str:
+    """Конвертирует секунды в формат SRT: HH:MM:SS,mmm."""
+    ms = int((seconds % 1) * 1000)
+    s = int(seconds)
+    m, s = divmod(s, 60)
+    h, m = divmod(m, 60)
+    return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
+
 
 # Допустимые значения качества (ограничиваем снизу/сверху)
 _ALLOWED_QUALITIES = (144, 240, 360, 480, 720, 1080)
@@ -220,10 +231,11 @@ class YoutubeTool(Tool):
         opts = self._base_opts(outtmpl)
 
         if fmt == "mp3":
-            opts["format"] = "bestaudio/best"
-            opts["postprocessors"] = [{"key": "FFmpegExtractAudio", "preferredcodec": "mp3"}]
+            # bestaudio без постпроцессора — ffmpeg может отсутствовать
+            opts["format"] = "bestaudio[ext=m4a]/bestaudio/best"
         else:
-            opts["format"] = f"bestvideo[height<={max_quality}]+bestaudio/best[height<={max_quality}]/best[height<={max_quality}]"
+            # best — уже смерженный стрим, не требует ffmpeg
+            opts["format"] = f"best[height<={max_quality}]/best"
 
         if want_thumb:
             opts["writethumbnail"] = True
@@ -253,7 +265,60 @@ class YoutubeTool(Tool):
         return path, title, sub_paths, thumb_path
 
     def _download_subs(self, url: str, title: str) -> list[str]:
-        """Скачивает субтитры отдельно; при 429/ошибке возвращает пустой список."""
+        """Скачивает субтитры через youtube-transcript-api (без ffmpeg/429).
+
+        Fallback: yt-dlp skip_download если transcript-api не установлена.
+        """
+        # Извлекаем video_id из URL
+        video_id = self._extract_video_id(url)
+        if video_id:
+            path = self._subs_via_transcript_api(video_id, title)
+            if path:
+                return [path]
+
+        # Fallback: yt-dlp
+        return self._subs_via_ytdlp(url, title)
+
+    @staticmethod
+    def _extract_video_id(url: str) -> str:
+        """Извлекает 11-символьный video ID из YouTube URL."""
+        m = re.search(r"(?:v=|youtu\.be/|/v/|/embed/)([\w-]{11})", url)
+        return m.group(1) if m else ""
+
+    def _subs_via_transcript_api(self, video_id: str, title: str) -> str | None:
+        """Получает субтитры через youtube-transcript-api (быстро, без 429)."""
+        try:
+            from youtube_transcript_api import YouTubeTranscriptApi  # ленивый импорт
+        except ImportError:
+            return None
+
+        try:
+            transcript = YouTubeTranscriptApi.get_transcript(
+                video_id, languages=["ru", "ru-RU", "en"]
+            )
+        except Exception:  # noqa: BLE001 — субтитры могут отсутствовать
+            try:
+                # Попробуем любые доступные
+                transcripts = YouTubeTranscriptApi.list_transcripts(video_id)
+                transcript = next(iter(transcripts)).fetch()
+            except Exception:  # noqa: BLE001
+                logger.warning("youtube-transcript-api: субтитры не найдены для %s", video_id)
+                return None
+
+        safe_title = title[:40].replace("/", "_").replace("\\", "_")
+        out_path = self._pending / f"{safe_title}.srt"
+        with out_path.open("w", encoding="utf-8") as f:
+            for i, entry in enumerate(transcript, 1):
+                start = entry["start"]
+                duration = entry.get("duration", 2.0)
+                end = start + duration
+                f.write(f"{i}\n")
+                f.write(f"{_fmt_srt_time(start)} --> {_fmt_srt_time(end)}\n")
+                f.write(f"{entry['text']}\n\n")
+        return str(out_path)
+
+    def _subs_via_ytdlp(self, url: str, title: str) -> list[str]:
+        """Fallback: субтитры через yt-dlp skip_download; при ошибке — пустой список."""
         import yt_dlp  # ленивый импорт
 
         outtmpl = str(self._pending / "%(title)s.%(ext)s")
@@ -261,21 +326,19 @@ class YoutubeTool(Tool):
         opts["skip_download"] = True
         opts["writesubtitles"] = True
         opts["writeautomaticsub"] = True
-        opts["subtitleslangs"] = ["ru", "en", "ru-RU"]
+        opts["subtitleslangs"] = ["ru", "en"]
         opts["subtitlesformat"] = "srt"
-        opts["ignoreerrors"] = True   # не падать при 429 на субтитрах
+        opts["ignoreerrors"] = True
 
         try:
             with yt_dlp.YoutubeDL(opts) as ydl:
                 ydl.extract_info(url, download=True)
-        except Exception:  # noqa: BLE001 — 429/network, видео уже скачано
-            logger.warning("Субтитры недоступны (возможно rate-limit), пропускаем")
+        except Exception:  # noqa: BLE001
+            logger.warning("yt-dlp субтитры недоступны, пропускаем")
             return []
 
-        sub_paths: list[str] = []
         prefix = title[:40].replace("/", "_")
-        for candidate in self._pending.glob(f"*{prefix}*.srt"):
-            sub_paths.append(str(candidate))
-        for candidate in self._pending.glob(f"*{prefix}*.vtt"):
-            sub_paths.append(str(candidate))
-        return sub_paths
+        paths = []
+        for pat in (f"*{prefix}*.srt", f"*{prefix}*.vtt"):
+            paths.extend(str(p) for p in self._pending.glob(pat))
+        return paths

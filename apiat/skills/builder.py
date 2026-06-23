@@ -193,6 +193,10 @@ class SkillBuilder:
     def list_confirmed(self) -> list[str]:
         return sorted(p.stem for p in self._skills_dir.glob("*.py"))
 
+    def list_skills(self) -> list[str]:
+        """Алиас для list_confirmed — используется в команде помощи."""
+        return self.list_confirmed()
+
     def skills_report(self) -> str:
         """Текстовый отчёт о навыках для отправки оператору."""
         confirmed = self.list_confirmed()

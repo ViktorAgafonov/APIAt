@@ -57,6 +57,51 @@ class Storage:
         finally:
             conn.close()
 
+    def save_mail_thread(self, message_id: str, sender: str, subject: str,
+                         body: str, refs: str, direction: str) -> None:
+        """Сохраняет письмо в истории переписки (in/out)."""
+        conn = self._conn()
+        try:
+            conn.execute(
+                """
+                INSERT INTO mail_threads (message_id, sender, subject, body, refs, direction)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(message_id) DO UPDATE SET
+                    sender = excluded.sender,
+                    subject = excluded.subject,
+                    body = excluded.body,
+                    refs = excluded.refs,
+                    direction = excluded.direction
+                """,
+                (message_id, sender, subject, body, refs, direction),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def get_thread_history(self, refs: str, limit: int = 10) -> list[dict]:
+        """Возвращает историю писем по заголовкам References/In-Reply-To."""
+        if not refs:
+            return []
+        conn = self._conn()
+        try:
+            # Ищем все message_id в refs
+            ids = [m.strip() for m in refs.replace(",", " ").split() if m.strip()]
+            if not ids:
+                return []
+            placeholders = ",".join("?" for _ in ids)
+            rows = conn.execute(
+                f"""SELECT * FROM mail_threads
+                    WHERE message_id IN ({placeholders})
+                       OR ({" OR ".join("refs LIKE ?" for _ in ids)})
+                    ORDER BY created_at DESC
+                    LIMIT ?""",
+                ids + [f"%{m}%" for m in ids] + [limit],
+            ).fetchall()
+            return [dict(r) for r in rows]
+        finally:
+            conn.close()
+
     # --- задачи ---
     def save_task(self, task_id: str, task_type: str, status: str, payload: dict) -> None:
         conn = self._conn()

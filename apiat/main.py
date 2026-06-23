@@ -123,6 +123,31 @@ _BROWSER_AUTH_RE = re.compile(
 )
 
 
+def _strip_quotations(text: str) -> str:
+    """Убирает цитаты предыдущих писем из ответного письма.
+
+    Удаляет:
+    - строки, начинающиеся с '>'
+    - блоки после '-----Original Message-----'
+    - блоки после 'On ... wrote:'
+    """
+    lines = text.splitlines()
+    cleaned: list[str] = []
+    for line in lines:
+        stripped = line.lstrip()
+        if stripped.startswith(">"):
+            break
+        if stripped.startswith("-----"):
+            break
+        if re.match(r"On\s+.*\s+wrote:\s*$", stripped, re.IGNORECASE):
+            break
+        cleaned.append(line)
+    # Убираем хвост из пустых строк
+    while cleaned and not cleaned[-1].strip():
+        cleaned.pop()
+    return "\n".join(cleaned).strip()
+
+
 class Agent:
     """Сборка компонентов APIAt и обработка входящих писем."""
 
@@ -160,8 +185,20 @@ class Agent:
 
         self.storage.mark_mail_processed(mail.message_id, mail.sender)
 
+        # Сохраняем оригинальное письмо в историю переписки (до очистки цитат)
+        self.storage.save_mail_thread(
+            message_id=mail.message_id,
+            sender=mail.sender,
+            subject=mail.subject,
+            body=mail.body,
+            refs=mail.references,
+            direction="in",
+        )
+
+        # Очищаем тело от цитат предыдущих писем
+        body = _strip_quotations(mail.body)
         # Нормализуем неразрывные пробелы (\xa0 от inbox.ru и др.) → обычный пробел
-        body = mail.body.replace("\xa0", " ").replace("\u2009", " ").replace("\u200b", "")
+        body = body.replace("\xa0", " ").replace("\u2009", " ").replace("\u200b", "")
         mail = mail.model_copy(update={"body": body})
         logger.debug("Тело письма (repr): %r", body[:200])
 
@@ -267,10 +304,15 @@ class Agent:
         started = time.monotonic()
 
         try:
+            # Контекст треда: предыдущие письма в переписке
+            thread = self.storage.get_thread_history(mail.references, limit=6)
+            thread_context = self._format_thread_context(thread)
+
             task = await self.parser.parse(
                 mail,
                 skills=self.skill_builder.list_confirmed(),
                 chains=self.chain_runner.list_chains(),
+                thread_context=thread_context,
             )
             # Прокидываем пути вложений в задачу если тип поддерживает
             if mail.attachments and hasattr(task, "input_attachments"):
@@ -995,6 +1037,18 @@ class Agent:
             )
         )
 
+    def _format_thread_context(self, thread: list[dict]) -> str:
+        """Формирует текст с предыдущими письмами для LLM."""
+        if not thread:
+            return ""
+        lines = ["=== Контекст переписки ==="]
+        for m in thread:
+            direction = "Пользователь" if m["direction"] == "in" else "Агент"
+            lines.append(f"[{direction}] {m['subject']}")
+            lines.append(m["body"][:800])
+            lines.append("")
+        return "\n".join(lines)
+
     def _match_skill(self, text: str) -> str:
         """Точное/частичное совпадение имени навыка в тексте (быстро, без LLM)."""
         skills = self.skill_builder.list_confirmed()
@@ -1056,6 +1110,15 @@ class Agent:
             mail = mail.model_copy(update={"references": src.references})
         try:
             self.sender.send(mail)
+            # Сохраняем исходящее письмо для контекста треда
+            self.storage.save_mail_thread(
+                message_id=mail.in_reply_to or f"out-{hash(mail.to + mail.subject)}",
+                sender=mail.to,
+                subject=mail.subject,
+                body=mail.body,
+                refs=mail.references,
+                direction="out",
+            )
         except Exception:  # noqa: BLE001
             logger.exception("Не удалось отправить ответ на %s", mail.to)
 

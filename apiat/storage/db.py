@@ -59,6 +59,17 @@ CREATE TABLE IF NOT EXISTS tokens (
     value      TEXT NOT NULL,
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+CREATE TABLE IF NOT EXISTS mail_threads (
+    message_id TEXT PRIMARY KEY,
+    sender     TEXT NOT NULL,
+    subject    TEXT,
+    body       TEXT,
+    refs       TEXT,
+    direction  TEXT NOT NULL CHECK(direction IN ('in', 'out')),
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_mail_threads_refs ON mail_threads(refs);
 """
 
 

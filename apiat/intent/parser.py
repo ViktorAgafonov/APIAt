@@ -48,7 +48,8 @@ class IntentParser:
         return Agent(model=model, output_type=AnyTask, system_prompt=SYSTEM_PROMPT)
 
     async def parse(self, mail: IncomingMail, skills: list[str] | None = None,
-                    chains: list[str] | None = None) -> AnyTask:
+                    chains: list[str] | None = None,
+                    thread_context: str = "") -> AnyTask:
         """Разбирает письмо в типизированную задачу через LlmRouter."""
         text = f"Тема: {mail.subject}\n\n{mail.body}"
         if mail.attachments:
@@ -58,8 +59,10 @@ class IntentParser:
             )
             text += f"\n\n[Вложения от пользователя: {att_info}]"
 
-        # Контекст возможностей системы для LLM-оператора
+        # Контекст возможностей системы и истории переписки для LLM-оператора
         ctx = []
+        if thread_context:
+            ctx.append(thread_context)
         if skills:
             ctx.append(f"Закреплённые навыки: {', '.join(skills)}")
         if chains:

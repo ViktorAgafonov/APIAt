@@ -1172,13 +1172,19 @@ class Agent:
     def _reply(self, mail: IncomingMail, subject: str, body: str,
                attachments: list | None = None) -> None:
         """Отправить ответное письмо с правильными thread-заголовками."""
+        from email.utils import make_msgid
+        # References должен включать всю цепочку: prev refs + in_reply_to входящего письма
+        refs = " ".join(
+            m for m in (mail.references, mail.in_reply_to) if m.strip()
+        )
         self._safe_send(OutgoingMail(
             to=mail.sender,
             subject=subject,
             body=body,
             attachments=attachments or [],
+            message_id=make_msgid(domain="apiat.local"),
             in_reply_to=mail.message_id,
-            references=mail.references,
+            references=refs,
         ))
 
     def _reply_error(self, mail: IncomingMail, message: str, task_name: str = "unknown") -> None:
@@ -1191,12 +1197,14 @@ class Agent:
     def _safe_send(self, mail: OutgoingMail, reply_to: IncomingMail | None = None) -> None:
         src = reply_to or self._current_mail
         if src and mail.in_reply_to and not mail.references:
-            mail = mail.model_copy(update={"references": src.references})
+            mail = mail.model_copy(update={"references": " ".join(
+                m for m in (src.references, src.in_reply_to) if m.strip()
+            )})
         try:
             self.sender.send(mail)
             # Сохраняем исходящее письмо для контекста треда
             self.storage.save_mail_thread(
-                message_id=mail.in_reply_to or f"out-{hash(mail.to + mail.subject)}",
+                message_id=mail.message_id or mail.in_reply_to or f"out-{hash(mail.to + mail.subject)}",
                 sender=mail.to,
                 subject=mail.subject,
                 body=mail.body,

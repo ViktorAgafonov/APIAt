@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import smtplib
+import uuid
 from email.message import EmailMessage
 from pathlib import Path
 
@@ -14,6 +15,16 @@ logger = get_logger(__name__)
 
 
 _BODY_LIMIT = 50_000  # символов — если больше, бьём на части
+
+
+def _msg_id(value: str) -> str:
+    """Нормализует Message-ID: оборачивает в <> если ещё не обёрнут."""
+    v = value.strip()
+    if not v:
+        return v
+    if v.startswith("<") and v.endswith(">"):
+        return v
+    return f"<{v}>"
 
 
 class EmailSender:
@@ -43,16 +54,24 @@ class EmailSender:
         msg = EmailMessage()
         msg["From"] = self._s.smtp_from or self._s.smtp_user
         msg["To"] = mail.to
+
+        # Генерируем Message-ID для исходящего письма (RFC 2822)
+        if mail.message_id:
+            msg["Message-ID"] = _msg_id(mail.message_id)
+        else:
+            domain = (self._s.smtp_from or self._s.smtp_user or "apiat.local").split("@")[-1]
+            msg["Message-ID"] = f"<apiat-{uuid.uuid4().hex}@{domain}>"
+
         # Re: prefix чтобы клиент показывал как ответ в теме
         subject = mail.subject
         if mail.in_reply_to and not subject.lower().startswith("re:"):
             subject = f"Re: {subject}"
         msg["Subject"] = subject
         if mail.in_reply_to:
-            msg["In-Reply-To"] = mail.in_reply_to
+            msg["In-Reply-To"] = _msg_id(mail.in_reply_to)
             # References = предыдущие ID + текущий In-Reply-To — обязателен для треда (RFC 2822)
-            prev = " ".join(mail.references.split()) if mail.references else ""
-            refs = f"{prev} {mail.in_reply_to}".strip() if prev else mail.in_reply_to
+            prev_ids = [_msg_id(m) for m in mail.references.split() if m.strip()]
+            refs = " ".join(prev_ids + [_msg_id(mail.in_reply_to)])
             msg["References"] = refs
         msg.set_content(mail.body)
 

@@ -26,6 +26,7 @@ class IncomingMail(BaseModel):
     body: str = ""
     received_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     attachments: list[Attachment] = Field(default_factory=list)
+    in_reply_to: str = ""  # In-Reply-To заголовок (если письмо — ответ)
     references: str = ""  # заголовок References из входящего письма
 
 
@@ -36,5 +37,6 @@ class OutgoingMail(BaseModel):
     subject: str
     body: str
     attachments: list[Attachment] = Field(default_factory=list)
+    message_id: str | None = None  # будет сгенерирован перед отправкой
     in_reply_to: str | None = None
     references: str = ""  # для правильного треда в почтовом клиенте

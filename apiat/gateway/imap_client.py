@@ -91,6 +91,7 @@ class ImapClient:
         message_id = (msg.get("Message-ID") or "").strip()
         sender = _decode(msg.get("From"))
         subject = _decode(msg.get("Subject"))
+        in_reply_to = (msg.get("In-Reply-To") or "").strip()
         references = (msg.get("References") or "").strip()
         body, attachments = self._extract_parts(msg)
         return IncomingMail(
@@ -99,6 +100,7 @@ class ImapClient:
             subject=subject,
             body=body,
             attachments=attachments,
+            in_reply_to=in_reply_to,
             references=references,
         )
 

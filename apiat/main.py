@@ -13,7 +13,7 @@ from .gateway.security import is_authorized
 from .intent.parser import IntentParser
 from .intent.router import LlmAllProvidersFailedError
 from .intent.self_corrector import SelfCorrector, try_apply_and_verify
-from .models.base import TaskStatus
+from .models.base import TaskStatus, TaskType
 from .models.email import IncomingMail, OutgoingMail
 from .skills.builder import SkillBuilder
 from .skills.chain import ChainPlanner, ChainRunner, SkillChain

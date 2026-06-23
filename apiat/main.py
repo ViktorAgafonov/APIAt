@@ -122,6 +122,12 @@ _BROWSER_AUTH_RE = re.compile(
     re.IGNORECASE | re.DOTALL,
 )
 
+# Многошаговая авторизация: "многошаговая авторизация: url=..." + список шагов
+_BROWSER_MULTI_AUTH_RE = re.compile(
+    r"(многошаговая\s+авторизация|multi[-\s]?step\s+auth)\s*[:\-]?\s*(.+)",
+    re.IGNORECASE | re.DOTALL,
+)
+
 
 def _strip_quotations(text: str) -> str:
     """Убирает цитаты предыдущих писем из ответного письма.
@@ -280,6 +286,12 @@ class Agent:
 
         if _WL_LIST_RE.search(mail.body):
             self._handle_whitelist_list(mail)
+            return
+
+        # Команда: многошаговая браузерная авторизация
+        multi_auth_m = _BROWSER_MULTI_AUTH_RE.search(mail.body)
+        if multi_auth_m:
+            await self._handle_browser_multi_auth(mail, multi_auth_m.group(2).strip())
             return
 
         # Команда: браузерная авторизация
@@ -915,6 +927,12 @@ class Agent:
             "## Браузерная авторизация",
             "  авторизуйся: url=https://... логин=user пароль=pass",
             "    — Chromium входит на сайт, сессия сохраняется в БД",
+            "  многошаговая авторизация: url=https://...",
+            "    fill <селектор> <значение>",
+            "    click <селектор>",
+            "    wait <мс>",
+            "    goto <url>",
+            "    — поддерживает подстановки {login} и {password}",
             "",
             "## Помощь",
             "  помощь / help  — эта справка",
@@ -1017,6 +1035,36 @@ class Agent:
                 return "\n".join(lines)
             finally:
                 await browser.close()
+
+    async def _handle_browser_multi_auth(self, mail: IncomingMail, params_str: str) -> None:
+        """Многошаговая авторизация через Playwright по списку шагов."""
+        params = _parse_inline_params(params_str)
+        url = params.get("url")
+        login = params.get("логин") or params.get("login") or params.get("user")
+        password = params.get("пароль") or params.get("password") or params.get("pass")
+
+        steps = _parse_auth_steps(params_str, login, password)
+        if not url:
+            body = "Укажите url=... в команде.\nПример:\nмногошаговая авторизация: url=https://site.com\nfill #email user@example.com\nclick button.next\nfill #password pass\nclick button[type=submit]"
+            self._safe_send(OutgoingMail(
+                to=mail.sender,
+                subject="APIAt: многошаговая авторизация — ОШИБКА",
+                body=body,
+                in_reply_to=mail.message_id,
+            ))
+            return
+
+        try:
+            result_msg = await self._do_browser_multi_auth(url, steps)
+        except Exception as exc:  # noqa: BLE001
+            result_msg = f"Ошибка: {exc}"
+
+        self._safe_send(OutgoingMail(
+            to=mail.sender,
+            subject="APIAt: многошаговая авторизация",
+            body=result_msg,
+            in_reply_to=mail.message_id,
+        ))
 
     def _reply_result(
         self, mail: IncomingMail, task_name: str, status: str, result: dict, elapsed: float
@@ -1133,6 +1181,92 @@ class Agent:
         for mail in mails:
             await self.process_mail(mail)
         return len(mails)
+
+
+def _parse_auth_steps(text: str, login: str | None, password: str | None) -> list[tuple[str, str, str]]:
+    """Парсит список шагов для многошаговой авторизации.
+
+    Формат строки:
+      fill <selector> <value>
+      click <selector>
+      wait <milliseconds>
+      goto <url>
+
+    Поддерживает подстановки {login} и {password}.
+    """
+    steps: list[tuple[str, str, str]] = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        # Пропускаем строки с параметрами key=value
+        if "=" in line and not line.startswith(("fill", "click", "wait", "goto")):
+            continue
+        parts = line.split(maxsplit=2)
+        if len(parts) < 2:
+            continue
+        action = parts[0].lower()
+        selector = parts[1]
+        value = parts[2] if len(parts) > 2 else ""
+        if login:
+            value = value.replace("{login}", login)
+        if password:
+            value = value.replace("{password}", password)
+        steps.append((action, selector, value))
+    return steps
+
+
+async def _do_browser_multi_auth(url: str, steps: list[tuple[str, str, str]]) -> str:
+    """Выполняет многошаговую авторизацию в Playwright."""
+    from urllib.parse import urlparse
+    from playwright.async_api import async_playwright
+
+    domain = urlparse(url).netloc
+
+    async with async_playwright() as pw:
+        browser = await pw.chromium.launch(headless=True)
+        try:
+            context = await browser.new_context()
+            page = await context.new_page()
+            await page.goto(url, wait_until="domcontentloaded", timeout=30_000)
+            lines = [f"Открыта страница: {url}"]
+
+            for action, selector, value in steps:
+                try:
+                    if action == "fill":
+                        await page.locator(selector).first.fill(value, timeout=5_000)
+                        lines.append(f"fill {selector}: OK")
+                    elif action == "click":
+                        await page.locator(selector).first.click(timeout=5_000)
+                        await page.wait_for_load_state("domcontentloaded", timeout=15_000)
+                        lines.append(f"click {selector}: OK")
+                    elif action == "wait":
+                        ms = int(value or "1000")
+                        await page.wait_for_timeout(ms)
+                        lines.append(f"wait {ms}ms: OK")
+                    elif action == "goto":
+                        await page.goto(selector, wait_until="domcontentloaded", timeout=30_000)
+                        lines.append(f"goto {selector}: OK")
+                    else:
+                        lines.append(f"неизвестное действие: {action}")
+                except Exception as e:  # noqa: BLE001
+                    lines.append(f"{action} {selector}: {e}")
+                    break
+
+            title = await page.title()
+            lines.append(f"Заголовок страницы: {title}")
+
+            state = await context.storage_state()
+            # domain берём от целевого url, если goto увёл куда-то ещё
+            target_domain = urlparse(page.url).netloc or domain
+            storage = Storage(get_settings().db_path)
+            storage.save_browser_session(target_domain, state)
+            if state.get("cookies"):
+                storage.save_cookies(target_domain, state["cookies"])
+            lines.append(f"Сессия сохранена для домена: {target_domain}")
+            return "\n".join(lines)
+        finally:
+            await browser.close()
 
 
 def _parse_inline_params(text: str) -> dict[str, str]:

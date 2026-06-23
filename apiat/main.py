@@ -258,8 +258,8 @@ class Agent:
             await self._handle_run_skill(mail, run_skill_m.group(2).strip())
             return
 
-        # Нечёткое совпадение с именем закреплённого навыка
-        matched_skill = self._match_skill(mail.body)
+        # Нечёткое совпадение с именем закреплённого навыка (точно + LLM)
+        matched_skill = await self._match_skill(mail.body)
         if matched_skill:
             await self._handle_run_skill(mail, matched_skill)
             return
@@ -982,23 +982,31 @@ class Agent:
             )
         )
 
-    def _match_skill(self, text: str) -> str:
-        """Находит имя закреплённого навыка по точному или нечёткому совпадению с текстом письма."""
+    async def _match_skill(self, text: str) -> str:
+        """Находит имя закреплённого навыка: сначала точно, потом через LLM."""
         skills = self.skill_builder.list_confirmed()
         if not skills:
             return ""
-        # Нормализуем: пробелы→_, строчные, убираем знаки
+        # 1. Точное/частичное совпадение (быстро, без LLM)
         normalized = re.sub(r"[^\w]", "_", text.strip().lower()).strip("_")
-        # 1. Точное совпадение имени навыка в тексте
         for skill in skills:
             if skill in normalized or normalized in skill:
                 return skill
-        # 2. Все слова из имени навыка присутствуют в тексте
-        text_words = set(re.split(r"[\W_]+", text.lower()))
-        for skill in skills:
-            skill_words = set(w for w in re.split(r"_+", skill) if len(w) > 2)
-            if skill_words and skill_words.issubset(text_words):
-                return skill
+        # 2. LLM выбирает подходящий навык из списка
+        skills_list = ", ".join(skills)
+        prompt = (
+            f"Доступные навыки: {skills_list}\n\n"
+            f"Запрос пользователя: {text[:300]}\n\n"
+            f"Если запрос явно подходит под один из навыков — ответь ТОЛЬКО именем навыка из списка. "
+            f"Если ни один не подходит — ответь NONE."
+        )
+        try:
+            answer = await self.parser.router.complete(prompt)
+            answer = answer.strip().splitlines()[0].strip()
+            if answer in skills:
+                return answer
+        except Exception:  # noqa: BLE001
+            pass
         return ""
 
     async def _handle_run_skill(self, mail: IncomingMail, skill_name: str) -> None:

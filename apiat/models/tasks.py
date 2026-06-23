@@ -60,6 +60,7 @@ class BrowserTask(BaseTask):
     type: Literal[TaskType.BROWSER] = TaskType.BROWSER
     url: str
     instruction: str
+    screenshot: bool = False  # сделать скриншот страницы и приложить к ответу
 
 
 class FileTask(BaseTask):

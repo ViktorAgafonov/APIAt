@@ -128,6 +128,12 @@ _BROWSER_MULTI_AUTH_RE = re.compile(
     re.IGNORECASE | re.DOTALL,
 )
 
+# Скриншот страницы: "скриншот https://..." / "screenshot https://..."
+_SCREENSHOT_RE = re.compile(
+    r"(скриншот|screenshot)\s+(.+)",
+    re.IGNORECASE | re.DOTALL,
+)
+
 
 def _strip_quotations(text: str) -> str:
     """Убирает цитаты предыдущих писем из ответного письма.
@@ -298,6 +304,12 @@ class Agent:
         auth_m = _BROWSER_AUTH_RE.search(mail.body)
         if auth_m:
             await self._handle_browser_auth(mail, auth_m.group(2).strip())
+            return
+
+        # Команда: скриншот страницы
+        shot_m = _SCREENSHOT_RE.search(mail.body)
+        if shot_m:
+            await self._handle_screenshot(mail, shot_m.group(2).strip())
             return
 
         # Помощь
@@ -924,7 +936,9 @@ class Agent:
             "  добавь в whitelist user@example.com  — добавить адрес",
             "  убери из whitelist user@example.com  — удалить адрес",
             "",
-            "## Браузерная авторизация",
+            "## Браузер и скриншоты",
+            "  браузер / открой https://...     — извлечь текст страницы",
+            "  скриншот https://...             — снимок страницы во вложении",
             "  авторизуйся: url=https://... логин=user пароль=pass",
             "    — Chromium входит на сайт, сессия сохраняется в БД",
             "  многошаговая авторизация: url=https://...",
@@ -1065,6 +1079,24 @@ class Agent:
             body=result_msg,
             in_reply_to=mail.message_id,
         ))
+
+    async def _handle_screenshot(self, mail: IncomingMail, target: str) -> None:
+        """Делает скриншот страницы через browser workflow и отправляет результат."""
+        from .models.tasks import BrowserTask
+        url = target.split()[0]
+        task = BrowserTask(url=url, instruction="screenshot", screenshot=True)
+        task.source_email = mail.sender
+        task.message_id = mail.message_id
+        self.storage.save_task(task.task_id, task.type.value, "PARSED", task.model_dump(mode="json"))
+        try:
+            state = await self.engine.run(task)
+        except Exception as exc:  # noqa: BLE001
+            self._reply_error(mail, f"Ошибка скриншота: {exc}", task_name="browser")
+            return
+        status = state.get("status", "FAILED")
+        result = state.get("result", {})
+        self.storage.save_result(task.task_id, summary=result.get("summary", ""), data=result.get("data", {}))
+        self._reply_result(mail, "browser", status, result, elapsed=0)
 
     def _reply_result(
         self, mail: IncomingMail, task_name: str, status: str, result: dict, elapsed: float

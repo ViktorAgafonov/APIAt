@@ -156,18 +156,22 @@ class Agent:
         self.settings.ensure_dirs()
         self.storage = Storage(self.settings.db_path)
         self.imap = ImapClient(self.settings)
+        self.sender = EmailSender(self.settings)
+        self.mail_ring = MailRingLog(self.settings.data_dir / "logs")
+        self._pending_chains: dict[str, SkillChain] = {}  # run_id -> chain (ожидают сохранения)
+        self._current_mail: IncomingMail | None = None  # для thread-заголовков в _safe_send
+        self._init_llm_components()
+
+    def _init_llm_components(self) -> None:
+        """Пересоздаёт компоненты, зависящие от LLM-настроек."""
         self.parser = IntentParser(self.settings)
         self.registry = ToolRegistry(self.settings.data_dir, llm_router=self.parser.router, storage=self.storage)
         self.engine = WorkflowEngine(self.registry, self.settings.db_path)
-        self.sender = EmailSender(self.settings)
         self.skill_builder = SkillBuilder(self.settings, self.settings.data_dir / "skills")
         self.chain_runner = ChainRunner(self.settings.data_dir / "skills", self.settings.data_dir)
         self.chain_planner = ChainPlanner(
             self.skill_builder._router, self.settings.data_dir / "skills"
         )
-        self._pending_chains: dict[str, SkillChain] = {}  # run_id -> chain (ожидают сохранения)
-        self.mail_ring = MailRingLog(self.settings.data_dir / "logs")
-        self._current_mail: IncomingMail | None = None  # для thread-заголовков в _safe_send
 
     async def process_mail(self, mail: IncomingMail) -> None:
         """Полный цикл обработки одного письма."""
@@ -674,10 +678,10 @@ class Agent:
 
         success, msg = await try_apply_and_verify(updates)
         if success:
-            # Перезагружаем parser с новыми настройками
+            # Перезагружаем все LLM-зависимые компоненты
             get_settings.cache_clear()
             self.settings = get_settings()
-            self.parser = IntentParser(self.settings)
+            self._init_llm_components()
         self._safe_send(OutgoingMail(
             to=mail.sender,
             subject=f"APIAt: LLM {'обновлён' if success else 'откат'}",

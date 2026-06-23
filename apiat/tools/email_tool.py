@@ -51,7 +51,8 @@ class EmailSender:
         if mail.in_reply_to:
             msg["In-Reply-To"] = mail.in_reply_to
             # References = предыдущие ID + текущий In-Reply-To — обязателен для треда (RFC 2822)
-            refs = f"{mail.references} {mail.in_reply_to}".strip() if mail.references else mail.in_reply_to
+            prev = " ".join(mail.references.split()) if mail.references else ""
+            refs = f"{prev} {mail.in_reply_to}".strip() if prev else mail.in_reply_to
             msg["References"] = refs
         msg.set_content(mail.body)
 

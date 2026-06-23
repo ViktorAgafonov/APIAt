@@ -5,6 +5,7 @@ from __future__ import annotations
 import email
 import imaplib
 import re
+import time
 from email.header import decode_header, make_header
 from email.message import Message
 from pathlib import Path
@@ -16,6 +17,8 @@ from ..utils.logging import get_logger
 logger = get_logger(__name__)
 
 _MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024  # 25 MB
+_IMAP_RETRIES = 3
+_IMAP_BACKOFF = 2  # секунды
 
 
 def _decode(value: str | None) -> str:
@@ -42,7 +45,22 @@ class ImapClient:
         return conn
 
     def fetch_unseen(self) -> list[IncomingMail]:
-        """Возвращает непрочитанные письма и помечает их как прочитанные."""
+        """Возвращает непрочитанные письма и помечает их как прочитанные.
+
+        Повторяет попытку при сетевых сбоях (ConnectionReset, timeout).
+        """
+        for attempt in range(1, _IMAP_RETRIES + 1):
+            try:
+                return self._fetch_unseen_once()
+            except (ConnectionResetError, OSError, imaplib.IMAP4.abort) as exc:
+                logger.warning("IMAP попытка %d/%d не удалась: %s", attempt, _IMAP_RETRIES, exc)
+                if attempt == _IMAP_RETRIES:
+                    raise
+                time.sleep(_IMAP_BACKOFF * attempt)
+        return []
+
+    def _fetch_unseen_once(self) -> list[IncomingMail]:
+        """Одна попытка получения писем."""
         conn = self._connect()
         mails: list[IncomingMail] = []
         try:

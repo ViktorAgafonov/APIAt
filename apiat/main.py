@@ -231,16 +231,6 @@ class Agent:
 
         self.storage.mark_mail_processed(mail.message_id, mail.sender)
 
-        # Сохраняем оригинальное письмо в историю переписки (до очистки цитат)
-        self.storage.save_mail_thread(
-            message_id=mail.message_id,
-            sender=mail.sender,
-            subject=mail.subject,
-            body=mail.body,
-            refs=mail.references,
-            direction="in",
-        )
-
         # Очищаем тело от цитат предыдущих писем
         body = _strip_quotations(mail.body)
         # Нормализуем неразрывные пробелы (\xa0 от inbox.ru и др.) → обычный пробел
@@ -253,8 +243,25 @@ class Agent:
                 body,
             )
             body = body.strip()
-        mail = mail.model_copy(update={"body": body})
+            subject = re.sub(
+                rf"(?i)\b{re.escape(self.settings.secret_token)}\b[,\s]*",
+                "",
+                mail.subject,
+            ).strip()
+        else:
+            subject = mail.subject
+        mail = mail.model_copy(update={"body": body, "subject": subject})
         logger.debug("Тело письма (repr): %r", body[:200])
+
+        # Сохраняем письмо в историю переписки (после очистки от токена)
+        self.storage.save_mail_thread(
+            message_id=mail.message_id,
+            sender=mail.sender,
+            subject=mail.subject,
+            body=mail.body,
+            refs=mail.references,
+            direction="in",
+        )
 
         # Команда оператора: обновить код с GitHub
         if _UPDATE_CMD_RE.search(mail.body):

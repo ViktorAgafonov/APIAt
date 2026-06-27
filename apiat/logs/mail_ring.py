@@ -49,10 +49,11 @@ class MailRingLog:
     ) -> None:
         """Добавляет запись о письме; вытесняет самое старое если >ring_size."""
         preview = _mask_token(mail.body[:300], secret_token)
+        subject = _mask_token(mail.subject, secret_token)
         entry = {
             "ts": datetime.now(timezone.utc).isoformat(),
             "sender": mail.sender,
-            "subject": mail.subject,
+            "subject": subject,
             "body_preview": preview,
             "task_type": task_type,
             "status": status,

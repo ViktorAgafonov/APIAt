@@ -21,13 +21,30 @@ _TIMEOUT = 15
 _LLM_NEWS_PROMPT = """\
 Подготовь дайджест новостей для оператора по теме: {topic}
 
-Требования:
-- {max_results} самых важных и актуальных новостей (на основе твоих знаний)
+ВНИМАНИЕ: актуальные новости недоступны (RSS не сработал).
+На основе своих знаний подготовь {max_results} новостей по теме.
+Обязательно укажи в начале: "ВНИМАНИЕ: данные из памяти модели, могут быть устаревшими."
 - Каждая новость: заголовок, краткое описание 1-2 предложения, источник если знаешь
 - Формат plain text, удобный для чтения в письме
 - Укажи дату актуальности своих знаний в конце
 
 Не добавляй вводных фраз — сразу список новостей.
+"""
+
+_LLM_SUMMARIZE_PROMPT = """\
+Ты редактор новостей. На основе RSS-результатов ниже подготовь дайджест \
+для оператора по теме: {topic}
+
+Требования:
+- Выбери {max_results} самых важных новостей из списка
+- Каждая: заголовок, краткое описание 1-2 предложения (на основе заголовка и источника)
+- Укажи источник
+- Формат plain text, удобный для чтения в письме
+
+Не добавляй вводных фраз — сразу список новостей.
+
+## RSS-результаты:
+{rss_data}
 """
 
 
@@ -79,9 +96,46 @@ class SearchTool(Tool):
         use_rss = getattr(task, "use_rss", False)
         is_news = task_type == TaskType.NEWS
 
-        if use_rss or not is_news:
-            return await self._rss_search(query, max_results, is_news)
-        return await self._llm_digest(query, max_results)
+        if is_news:
+            # NEWS: всегда сначала RSS, затем LLM-суммаризация реальных результатов
+            return await self._news_search(query, max_results, use_rss)
+        # SEARCH: RSS-режим
+        return await self._rss_search(query, max_results, is_news=False)
+
+    async def _news_search(self, query: str, max_results: int, raw_rss: bool) -> ToolResult:
+        """Поиск новостей: RSS → LLM-суммаризация. Fallback на LLM-дайджест из памяти."""
+        try:
+            items = _fetch_gnews(query, max_results)
+        except Exception as e:  # noqa: BLE001
+            # RSS не сработал — fallback к LLM из памяти с предупреждением
+            if self._router is not None:
+                return await self._llm_digest(query, max_results)
+            return ToolResult(success=False, summary=f"Ошибка RSS: {e}", error=str(e))
+
+        if not items:
+            if self._router is not None:
+                return await self._llm_digest(query, max_results)
+            return ToolResult(success=False, summary=f"RSS вернул пустой результат по запросу: {query!r}")
+
+        # Если оператор запросил сырой RSS — отдаём как есть
+        if raw_rss or self._router is None:
+            summary = f"Новости (RSS) по запросу: {query!r} ({len(items)} шт.)\n\n{_format_rss(items)}"
+            return ToolResult(success=True, summary=summary, data={"query": query, "results": items})
+
+        # LLM-суммаризация реальных RSS-результатов
+        try:
+            rss_data = _format_rss(items)
+            prompt = _LLM_SUMMARIZE_PROMPT.format(topic=query, max_results=max_results, rss_data=rss_data)
+            digest = await self._router.complete(prompt)
+            return ToolResult(
+                success=True,
+                summary=f"Новости по теме: {query!r}\n\n{digest}",
+                data={"query": query, "results": items},
+            )
+        except Exception as e:  # noqa: BLE001
+            # LLM не сработал — отдаём сырой RSS
+            summary = f"Новости (RSS) по запросу: {query!r} ({len(items)} шт.)\n\n{_format_rss(items)}"
+            return ToolResult(success=True, summary=summary, data={"query": query, "results": items})
 
     async def _rss_search(self, query: str, max_results: int, is_news: bool) -> ToolResult:
         try:
@@ -94,8 +148,9 @@ class SearchTool(Tool):
         return ToolResult(success=True, summary=summary, data={"query": query, "results": items})
 
     async def _llm_digest(self, topic: str, max_results: int) -> ToolResult:
+        """Fallback: LLM-дайджест из памяти с предупреждением об устаревших данных."""
         if self._router is None:
-            return await self._rss_search(topic, max_results, is_news=True)
+            return ToolResult(success=False, summary=f"LLM недоступен, RSS не сработал для темы: {topic!r}")
         try:
             prompt = _LLM_NEWS_PROMPT.format(topic=topic, max_results=max_results)
             digest = await self._router.complete(prompt)

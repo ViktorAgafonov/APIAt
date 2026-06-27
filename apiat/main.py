@@ -152,6 +152,18 @@ _LIMIT_CMD_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Анализ логов сервера: "логи сервера" / "server logs"
+_SERVER_LOG_RE = re.compile(
+    r"(логи\s*сервера|server\s*logs?|системные\s*логи)",
+    re.IGNORECASE,
+)
+
+# Анализ логов приложения: "логи приложения" / "app logs"
+_APP_LOG_RE = re.compile(
+    r"(логи\s*приложения|app\s*logs?|логи\s*агента)",
+    re.IGNORECASE,
+)
+
 
 def _strip_quotations(text: str) -> str:
     """Убирает цитаты предыдущих писем из ответного письма.
@@ -344,6 +356,16 @@ class Agent:
         # Команда: управление лимитами
         if _LIMIT_CMD_RE.search(mail.body):
             self._handle_limit_command(mail)
+            return
+
+        # Анализ логов сервера
+        if _SERVER_LOG_RE.search(mail.body):
+            await self._handle_server_logs(mail)
+            return
+
+        # Анализ логов приложения
+        if _APP_LOG_RE.search(mail.body):
+            await self._handle_app_logs(mail)
             return
 
         # Помощь
@@ -986,6 +1008,8 @@ class Agent:
             "  переключи llm           — поменять местами primary и fallback",
             "  переключи llm + KEY=..  — записать новые параметры LLM",
             "  лимит                  — показать/установить лимиты отправки",
+            "  логи сервера           — анализ системных логов (journalctl)",
+            "  логи приложения        — анализ ошибок приложения через LLM",
             "",
             "## Самообучение и навыки",
             "  самообучись: <описание>         — создать навык: LLM → ревью → sandbox",
@@ -1337,6 +1361,81 @@ class Agent:
                 ))
             self.storage.delete_pending_send(pending["token"])
             return
+
+    async def _handle_server_logs(self, mail: IncomingMail) -> None:
+        """Собирает логи journalctl -u apiat и отправляет в LLM для анализа."""
+        try:
+            r = subprocess.run(
+                ["journalctl", "-u", "apiat", "--no-pager", "-n", "200",
+                 "--since", "6h ago"],
+                capture_output=True, text=True, timeout=15,
+            )
+            raw_logs = r.stdout or r.stderr or "journalctl недоступен"
+        except (subprocess.SubprocessError, FileNotFoundError) as exc:
+            raw_logs = f"Не удалось получить логи: {exc}"
+
+        if len(raw_logs) > 30_000:
+            raw_logs = raw_logs[-30_000:]
+
+        prompt = (
+            "Ты системный администратор. Проанализируй логи сервиса apiat "
+            "(systemd/journald). Найди проблемы, ошибки, предупреждения. "
+            "Предложи варианты исправлений. Ответь на русском, кратко.\n\n"
+            f"## Логи (последние строки)\n```\n{raw_logs}\n```"
+        )
+        try:
+            analysis = await self.parser.router.complete(prompt)
+        except Exception as exc:  # noqa: BLE001
+            analysis = f"LLM-анализ недоступен: {exc}\n\n## Сырые логи:\n{raw_logs[:5000]}"
+
+        self._reply(mail, "APIAt: анализ логов сервера", analysis)
+
+    async def _handle_app_logs(self, mail: IncomingMail) -> None:
+        """Фильтрует логи приложения (ERROR/Exception/Traceback) и анализирует через LLM."""
+        try:
+            r = subprocess.run(
+                ["journalctl", "-u", "apiat", "--no-pager", "-n", "500",
+                 "--since", "6h ago"],
+                capture_output=True, text=True, timeout=15,
+            )
+            raw_logs = r.stdout or r.stderr or ""
+        except (subprocess.SubprocessError, FileNotFoundError) as exc:
+            raw_logs = f"Не удалось получить логи: {exc}"
+
+        # Фильтруем только значимые строки приложения
+        significant: list[str] = []
+        for line in raw_logs.splitlines():
+            if re.search(
+                r"\[ERROR\]|\[WARNING\]|Exception|Traceback|Error:|"
+                r"FAILED|LlmAllProvidersFailed|IMAP|SMTP|отклонено|"
+                r"не удалось|ошибка|превышен",
+                line, re.IGNORECASE,
+            ):
+                significant.append(line)
+
+        if not significant:
+            self._reply(mail, "APIAt: анализ логов приложения",
+                        "Ошибок и предупреждений в логах за последние 6 часов не найдено.")
+            return
+
+        filtered = "\n".join(significant[-200:])
+        if len(filtered) > 30_000:
+            filtered = filtered[-30_000:]
+
+        prompt = (
+            "Ты DevOps-инженер. Проанализируй логи приложения APIAt "
+            "(Python-агент, IMAP/SMTP, LLM-роутер). Найди причины ошибок, "
+            "предложи конкретные исправления. Учитывай архитектуру: "
+            "email → IMAP → LLM-парсер → workflow → SMTP-ответ. "
+            "Ответь на русском, структурированно: проблемы → причины → исправления.\n\n"
+            f"## Отфильтрованные логи (ERROR/WARNING/Exception)\n```\n{filtered}\n```"
+        )
+        try:
+            analysis = await self.parser.router.complete(prompt)
+        except Exception as exc:  # noqa: BLE001
+            analysis = f"LLM-анализ недоступен: {exc}\n\n## Найденные ошибки:\n{filtered[:5000]}"
+
+        self._reply(mail, "APIAt: анализ логов приложения", analysis)
 
     def _handle_limit_command(self, mail: IncomingMail) -> None:
         """Показывает или устанавливает лимиты отправки.

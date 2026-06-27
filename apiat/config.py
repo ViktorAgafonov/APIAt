@@ -99,7 +99,7 @@ class Settings(BaseSettings):
         providers: list[LlmProviderConfig] = [
             LlmProviderConfig(
                 name="primary",
-                provider_type="openai",
+                provider_type="openai" if self.llm_base_url else "google",
                 base_url=self.llm_base_url,
                 api_key=self.llm_api_key,
                 model_name=self.llm_model_name,

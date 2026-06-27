@@ -95,7 +95,12 @@ class Settings(BaseSettings):
         return int(self.attachment_limit_mb * 1024 * 1024)
 
     def llm_providers(self) -> list[LlmProviderConfig]:
-        """Возвращает список провайдеров по приоритету (primary первый, fallback второй)."""
+        """Возвращает список провайдеров по приоритету (primary первый, fallback второй).
+
+        provider_type определяется по наличию base_url:
+        - есть base_url → openai-совместимый
+        - нет base_url  → google (Gemini native SDK)
+        """
         providers: list[LlmProviderConfig] = [
             LlmProviderConfig(
                 name="primary",
@@ -107,7 +112,6 @@ class Settings(BaseSettings):
             ),
         ]
         if self.llm_fallback_api_key:
-            # Если fallback_base_url задан — это openai-совместимый провайдер
             fb_type = "openai" if self.llm_fallback_base_url else "google"
             providers.append(
                 LlmProviderConfig(

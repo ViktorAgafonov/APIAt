@@ -90,6 +90,13 @@ class SelfCorrector:
         for prim_key, fb_key in pairs:
             prim_val = self._get_value(content, prim_key) or ""
             fb_val = self._get_value(content, fb_key) or ""
+            # Валидация: значение не должно содержать = (признак склеивания строк)
+            if "=" in prim_val:
+                logger.warning("swap: подозрительное значение %s=%r — очищаем", prim_key, prim_val)
+                prim_val = ""
+            if "=" in fb_val:
+                logger.warning("swap: подозрительное значение %s=%r — очищаем", fb_key, fb_val)
+                fb_val = ""
             content = self._set_value(content, prim_key, fb_val)
             content = self._set_value(content, fb_key, prim_val)
             applied.append(f"{prim_key} ↔ {fb_key}: {prim_val!r} ⇄ {fb_val!r}")

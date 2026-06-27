@@ -40,6 +40,7 @@ class Settings(BaseSettings):
     llm_model_name: str = Field(default="wormsoft/agent/medium", alias="LLM_MODEL_NAME")
 
     # --- LLM Fallback (Google Gemini, платный, резервный) ---
+    llm_fallback_base_url: str = Field(default="", alias="LLM_FALLBACK_BASE_URL")
     llm_fallback_api_key: str = Field(default="", alias="LLM_FALLBACK_API_KEY")
     llm_fallback_model_name: str = Field(default="gemini-2.5-flash", alias="LLM_FALLBACK_MODEL_NAME")
 
@@ -96,10 +97,13 @@ class Settings(BaseSettings):
             ),
         ]
         if self.llm_fallback_api_key:
+            # Если fallback_base_url задан — это openai-совместимый провайдер
+            fb_type = "openai" if self.llm_fallback_base_url else "google"
             providers.append(
                 LlmProviderConfig(
                     name="fallback",
-                    provider_type="google",
+                    provider_type=fb_type,
+                    base_url=self.llm_fallback_base_url,
                     api_key=self.llm_fallback_api_key,
                     model_name=self.llm_fallback_model_name,
                     priority=1,

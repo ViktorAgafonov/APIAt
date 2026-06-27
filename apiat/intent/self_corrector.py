@@ -72,6 +72,31 @@ class SelfCorrector:
         logger.warning("Выполнен откат .env из .env.bak")
         return "Настройки LLM возвращены к предыдущей версии (.env.bak восстановлен)"
 
+    def swap_providers(self) -> list[str]:
+        """Меняет местами primary и fallback LLM параметры в .env.
+
+        Возвращает список применённых изменений.
+        """
+        if not self._env.exists():
+            raise EnvPatchError(f"{self._env} не найден")
+        self._backup()
+        content = self._env.read_text(encoding="utf-8")
+        pairs = [
+            ("LLM_BASE_URL", "LLM_FALLBACK_BASE_URL"),
+            ("LLM_API_KEY", "LLM_FALLBACK_API_KEY"),
+            ("LLM_MODEL_NAME", "LLM_FALLBACK_MODEL_NAME"),
+        ]
+        applied: list[str] = []
+        for prim_key, fb_key in pairs:
+            prim_val = self._get_value(content, prim_key) or ""
+            fb_val = self._get_value(content, fb_key) or ""
+            content = self._set_value(content, prim_key, fb_val)
+            content = self._set_value(content, fb_key, prim_val)
+            applied.append(f"{prim_key} ↔ {fb_key}: {prim_val!r} ⇄ {fb_val!r}")
+        self._write(content)
+        logger.info("Выполнен swap LLM провайдеров: %s", applied)
+        return applied
+
     def has_backup(self) -> bool:
         return self._bak.exists()
 

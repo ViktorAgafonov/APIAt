@@ -12,7 +12,7 @@ from .gateway.imap_client import ImapClient
 from .gateway.security import is_authorized
 from .intent.parser import IntentParser
 from .intent.router import LlmAllProvidersFailedError
-from .intent.self_corrector import SelfCorrector, try_apply_and_verify
+from .intent.self_corrector import SelfCorrector, try_apply_and_verify, _probe_llm
 from .models.base import TaskStatus, TaskType
 from .models.email import IncomingMail, OutgoingMail
 from .skills.builder import SkillBuilder
@@ -29,6 +29,12 @@ logger = get_logger(__name__)
 # Ключевые слова для команды переключения/настройки LLM от оператора
 _LLM_CMD_RE = re.compile(
     r"(переключи\s*llm|смени\s*нейромодель|switch\s*llm|llm\s*config)",
+    re.IGNORECASE,
+)
+
+# Список LLM провайдеров: "список llm" / "llm status"
+_LLM_LIST_RE = re.compile(
+    r"(список\s*llm|llm\s*status|статус\s*llm|покажи\s*llm)",
     re.IGNORECASE,
 )
 
@@ -148,7 +154,7 @@ def _strip_quotations(text: str) -> str:
     for line in lines:
         stripped = line.lstrip()
         if stripped.startswith(">"):
-            break
+            continue
         if stripped.startswith("-----"):
             break
         if re.match(r"On\s+.*\s+wrote:\s*$", stripped, re.IGNORECASE):
@@ -265,7 +271,12 @@ class Agent:
             await self._handle_chain_task(mail, chain_task_m.group(2).strip())
             return
 
-        # Команда оператора: изменить настройки LLM
+        # Команда оператора: список LLM провайдеров
+        if _LLM_LIST_RE.search(mail.body):
+            await self._handle_llm_status(mail)
+            return
+
+        # Команда оператора: переключить/настроить LLM
         if _LLM_CMD_RE.search(mail.body):
             await self._handle_llm_config_command(mail)
             return
@@ -667,42 +678,80 @@ class Agent:
             in_reply_to=mail.message_id,
         ))
 
-    async def _handle_llm_config_command(self, mail: IncomingMail) -> None:
-        """Разбирает команду оператора и применяет/откатывает изменения .env LLM.
+    async def _handle_llm_status(self, mail: IncomingMail) -> None:
+        """Показывает текущие LLM-провайдеры и diff с бэкапом."""
+        corrector = SelfCorrector(self.settings.db_path.parent.parent / ".env")
+        providers = self.settings.llm_providers()
+        router = self.parser.router
+        lines = ["Текущие LLM-провайдеры:"]
+        for p in providers:
+            status = "⚠ cooldown" if router._is_cooling_down(p.name) else "✓ доступен"
+            lines.append(f"  {p.name} ({p.provider_type}): {p.model_name} — {status}")
+        if corrector.has_backup():
+            lines.append("\nОтличия от .env.bak:")
+            lines.extend(corrector.diff())
+        self._safe_send(OutgoingMail(
+            to=mail.sender,
+            subject="APIAt: LLM статус",
+            body="\n".join(lines),
+            in_reply_to=mail.message_id,
+        ))
 
-        Формат команды (в теле письма):
-            переключи llm
+    async def _handle_llm_config_command(self, mail: IncomingMail) -> None:
+        """Переключение LLM: swap primary↔fallback или новые параметры.
+
+        Формат команды:
+            переключи llm                          — поменять местами primary и fallback
+            переключи llm                          — + новые параметры (см. ниже)
             LLM_BASE_URL=https://...
             LLM_API_KEY=...
             LLM_MODEL_NAME=...
-
-        Без дополнительных ключей — показывает текущее состояние и diff с бэкапом.
         """
-        corrector = SelfCorrector(self.settings.db_path.parent.parent / ".env")
+        env_path = self.settings.db_path.parent.parent / ".env"
+        corrector = SelfCorrector(env_path)
         updates = _parse_env_updates(mail.body)
 
         if not updates:
-            # Нет новых значений — статус провайдеров
-            providers = self.settings.llm_providers()
-            router = self.parser.router
-            lines = ["Текущие LLM-провайдеры:"]
-            for p in providers:
-                status = "⚠ cooldown" if router._is_cooling_down(p.name) else "✓ доступен"
-                lines.append(f"  {p.name} ({p.provider_type}): {p.model_name} — {status}")
-            if corrector.has_backup():
-                lines.append("\nОтличия от .env.bak:")
-                lines.extend(corrector.diff())
-            self._safe_send(OutgoingMail(
-                to=mail.sender,
-                subject="APIAt: LLM статус",
-                body="\n".join(lines),
-                in_reply_to=mail.message_id,
-            ))
+            # Нет параметров — swap primary ↔ fallback
+            try:
+                applied = corrector.swap_providers()
+            except Exception as exc:  # noqa: BLE001
+                self._safe_send(OutgoingMail(
+                    to=mail.sender,
+                    subject="APIAt: LLM swap — ошибка",
+                    body=f"Не удалось поменять провайдеры местами: {exc}",
+                    in_reply_to=mail.message_id,
+                ))
+                return
+            # Проверяем новые настройки
+            get_settings.cache_clear()
+            new_settings = get_settings()
+            try:
+                await _probe_llm(new_settings)
+                msg = "Провайдеры поменяли местами:\n" + "\n".join(applied)
+                self.settings = new_settings
+                self._init_llm_components()
+                self._safe_send(OutgoingMail(
+                    to=mail.sender,
+                    subject="APIAt: LLM swap — OK",
+                    body=msg,
+                    in_reply_to=mail.message_id,
+                ))
+            except Exception as exc:  # noqa: BLE001
+                # Откат swap
+                corrector.rollback()
+                get_settings.cache_clear()
+                self._safe_send(OutgoingMail(
+                    to=mail.sender,
+                    subject="APIAt: LLM swap — откат",
+                    body=f"Новые настройки не прошли проверку — откат.\nОшибка: {exc}\n\nПопытка swap:\n" + "\n".join(applied),
+                    in_reply_to=mail.message_id,
+                ))
             return
 
-        success, msg = await try_apply_and_verify(updates)
+        # Есть параметры — применяем как новые значения
+        success, msg = await try_apply_and_verify(updates, env_path=env_path)
         if success:
-            # Перезагружаем все LLM-зависимые компоненты
             get_settings.cache_clear()
             self.settings = get_settings()
             self._init_llm_components()
@@ -910,8 +959,9 @@ class Agent:
             "## Команды оператора",
             "  обнови код              — git pull + перезапуск сервиса",
             "  обнови среду            — пересборка Docker sandbox-образа",
-            "  переключи llm           — статус LLM-провайдеров",
-            "  переключи llm + KEY=..  — сменить параметры LLM",
+            "  список llm              — статус LLM-провайдеров",
+            "  переключи llm           — поменять местами primary и fallback",
+            "  переключи llm + KEY=..  — записать новые параметры LLM",
             "",
             "## Самообучение и навыки",
             "  самообучись: <описание>         — создать навык: LLM → ревью → sandbox",
@@ -1332,7 +1382,7 @@ def _parse_inline_params(text: str) -> dict[str, str]:
 def _parse_env_updates(body: str) -> dict[str, str]:
     """Извлекает KEY=value из тела письма (только LLM-ключи)."""
     allowed = {"LLM_BASE_URL", "LLM_API_KEY", "LLM_MODEL_NAME",
-               "LLM_FALLBACK_API_KEY", "LLM_FALLBACK_MODEL_NAME"}
+               "LLM_FALLBACK_BASE_URL", "LLM_FALLBACK_API_KEY", "LLM_FALLBACK_MODEL_NAME"}
     result: dict[str, str] = {}
     for line in body.splitlines():
         line = line.strip()

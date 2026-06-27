@@ -30,6 +30,23 @@ def _decode(value: str | None) -> str:
         return value
 
 
+def _html_to_text(html: str) -> str:
+    """Грубое преобразование HTML → текст без внешних зависимостей."""
+    # Убираем <style>, <script>
+    html = re.sub(r"<(style|script)[^>]*>.*?</\1>", "", html, flags=re.DOTALL | re.IGNORECASE)
+    # <br> → \n, блочные теги → \n
+    html = re.sub(r"<br\s*/?>", "\n", html, flags=re.IGNORECASE)
+    html = re.sub(r"</?(p|div|tr|li|h[1-6])\b[^>]*>", "\n", html, flags=re.IGNORECASE)
+    # Убираем остальные теги
+    html = re.sub(r"<[^>]+>", "", html)
+    # Декодируем базовые HTML-entities
+    html = (html.replace("&nbsp;", " ").replace("&amp;", "&")
+            .replace("&lt;", "<").replace("&gt;", ">").replace("&quot;", '"'))
+    # Схлопываем лишние пустые строки
+    html = re.sub(r"\n{3,}", "\n\n", html)
+    return html
+
+
 class ImapClient:
     """Тонкая обёртка над imaplib для получения непрочитанных писем."""
 
@@ -106,6 +123,7 @@ class ImapClient:
 
     def _extract_parts(self, msg: Message) -> tuple[str, list[Attachment]]:
         body_parts: list[str] = []
+        html_parts: list[str] = []
         attachments: list[Attachment] = []
         attach_dir = Path(self._s.data_dir) / "attachments"
 
@@ -138,5 +156,16 @@ class ImapClient:
                 payload = part.get_payload(decode=True) or b""
                 charset = part.get_content_charset() or "utf-8"
                 body_parts.append(payload.decode(charset, errors="replace"))
+            elif content_type == "text/html":
+                payload = part.get_payload(decode=True) or b""
+                charset = part.get_content_charset() or "utf-8"
+                html_parts.append(payload.decode(charset, errors="replace"))
 
-        return "\n".join(body_parts).strip(), attachments
+        # Если нет text/plain, используем HTML с очисткой тегов
+        if body_parts:
+            text = "\n".join(body_parts)
+        elif html_parts:
+            text = _html_to_text("\n".join(html_parts))
+        else:
+            text = ""
+        return text.strip(), attachments

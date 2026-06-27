@@ -577,7 +577,7 @@ class Agent:
         )
 
     async def _handle_learn_command(self, mail: IncomingMail, user_prompt: str) -> None:
-        """Запускает цикл самообучения: генерация → ревью → sandbox → валидация."""
+        """Запускает цикл самообучения: оценка сложности → генерация → ревью → sandbox → валидация."""
         logger.info("Самообучение по запросу: %s", user_prompt[:80])
         result = await self.skill_builder.build(user_prompt)
 

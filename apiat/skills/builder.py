@@ -37,6 +37,13 @@ _ENV_CONTEXT_BASE = """
 - profile=isolated — если задача НЕ требует сети (вычисления, обработка данных, форматирование)
 - profile=storage — если задача требует чтения/записи файлов на диск хоста (архивы, работа с data_dir)
 
+ДОСТУПНЫЕ РЕСУРСЫ И API:
+- Google News RSS: https://news.google.com/rss/search?q={query}&hl=ru&gl=RU&ceid=RU:ru (русские новости)
+- Google News RSS (мир): https://news.google.com/rss/search?q={query}&hl=en&gl=US&ceid=US:en (мировые новости)
+- data_dir структура: /opt/apiat/data/ — tmp/, downloads/done/, downloads/failed/, youtube/, browser/, attachments/, skills/, logs/
+- Для profile=storage монтируется /data (read-write) — можно читать и писать файлы
+- Для передачи данных между навыками в цепочке используется общий work_dir (profile=storage)
+
 ПРАВИЛА:
 - Не добавляй код, не относящийся к задаче (psutil, системная информация и т.п.)
 - Если задача требует сеть — обязательно указывай # skill:profile=network и # skill:timeout=60
@@ -103,6 +110,46 @@ _VALIDATE_PROMPT = """\
 Дай ответ строго "да" или "нет". Если "нет" — кратко укажи причину.
 """
 
+# Промт оценки сложности — решает: один навык или цепочка
+_COMPLEXITY_PROMPT = """\
+Проанализируй задание и определи его сложность.
+
+ЗАДАНИЕ:
+{user_prompt}
+
+ВОЗМОЖНОСТИ СИСТЕМЫ:
+- Навык — это один Python-файл, выполняющий ОДНУ функцию
+- Цепочка — последовательность навыков, где вывод каждого передаётся следующему
+- Профили: network (HTTP/RSS), isolated (вычисления), storage (файлы на диске)
+- Доступные модули: stdlib + requests + selectolax
+- Google News RSS для новостей
+- data_dir для хранения файлов между запусками
+
+КРИТЕРИИ СЛОЖНОСТИ:
+- simple (один навык) — задача решается одним HTTP-запросом или одной функцией
+- complex (цепочка) — задача требует нескольких шагов с разными профилями
+  (например: сбор данных → обработка → анализ → отправка)
+
+Если complex — предложи разбиение на отдельные навыки.
+
+Ответь в формате:
+COMPLEXITY: simple|complex
+
+Если complex, добавь строки навыков:
+SKILL: <короткое имя> | <профиль> | <описание одной строкой>
+SKILL: <короткое имя> | <профиль> | <описание одной строкой>
+...
+
+Пример complex-ответа:
+COMPLEXITY: complex
+SKILL: fetch_rss_ru | network | Сбор TOP-20 новостей России через Google News RSS
+SKILL: fetch_rss_world | network | Сбор TOP-20 мировых новостей через Google News RSS
+SKILL: translate_ru | isolated | Перевод текста новостей на русский язык
+SKILL: weekly_aggregate | storage | Агрегация новостных файлов за неделю из data_dir
+SKILL: analyze_digest | isolated | Глубокий анализ дайджеста: связи, последствия, значимость
+SKILL: send_whitelist | isolated | Отправка сводки на адреса из белого списка
+"""
+
 
 @dataclass
 class SkillBuildResult:
@@ -114,6 +161,14 @@ class SkillBuildResult:
     validate_verdict: str = ""
     error: str = ""
     steps: list[str] = field(default_factory=list)
+
+
+@dataclass
+class ComplexityResult:
+    """Результат оценки сложности задания."""
+    is_complex: bool
+    sub_skills: list[dict] = field(default_factory=list)  # [{"name": ..., "profile": ..., "description": ...}]
+    raw: str = ""
 
 
 class SkillBuilder:
@@ -130,9 +185,37 @@ class SkillBuilder:
         skills_dir.mkdir(parents=True, exist_ok=True)
 
     async def build(self, user_prompt: str) -> SkillBuildResult:
-        """Полный цикл построения навыка."""
+        """Полный цикл построения навыка: оценка → генерация → ревью → sandbox → валидация → сохранение."""
         result = SkillBuildResult(success=False)
         using_fallback = self._router.is_using_fallback()
+
+        # Шаг 0: оценка сложности
+        result.steps.append("0. Оценка сложности...")
+        logger.info("Skill build: оценка сложности для задания: %s", user_prompt[:100])
+        complexity = await self.assess_complexity(user_prompt)
+        if complexity.is_complex:
+            result.steps.append(f"   Сложность: complex — предложено {len(complexity.sub_skills)} навыков")
+            logger.info("Skill build: complex — %d навыков", len(complexity.sub_skills))
+            skills_list = "\n".join(
+                f"   • {s['name']} ({s['profile']}) — {s['description']}"
+                for s in complexity.sub_skills
+            )
+            result.error = (
+                f"ЗАДАЧА СЛОЖНАЯ — требуется цепочка из {len(complexity.sub_skills)} навыков.\n\n"
+                f"Предложенное разбиение:\n{skills_list}\n\n"
+                f"Для создания каждого навыка отправьте отдельные письма:\n"
+            )
+            for s in complexity.sub_skills:
+                result.error += f"  создай навык: {s['description']} (профиль {s['profile']})\n"
+            result.error += (
+                f"\nПосле создания и закрепления всех навыков, отправьте:\n"
+                f"  цепочка: <описание задачи>\n"
+                f"для автоматического построения и выполнения цепочки."
+            )
+            result.steps.append("   Ожидание создания отдельных навыков оператором")
+            return result
+        result.steps.append("   Сложность: simple — один навык")
+        logger.info("Skill build: simple — один навык")
 
         # Шаг 1: генерация кода
         result.steps.append("1. Генерация кода...")
@@ -252,6 +335,16 @@ class SkillBuilder:
 
         return "\n".join(lines)
 
+    async def assess_complexity(self, user_prompt: str) -> ComplexityResult:
+        """Оценивает сложность задания: один навык или цепочка."""
+        prompt = _COMPLEXITY_PROMPT.format(user_prompt=user_prompt)
+        try:
+            raw = await self._router.complete(prompt)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Skill build: оценка сложности не удалась: %s", exc)
+            return ComplexityResult(is_complex=False, raw=str(exc))
+        return _parse_complexity(raw)
+
     async def _generate_name(self, user_prompt: str) -> str:
         raw = await self._router.complete(_NAME_PROMPT.format(user_prompt=user_prompt))
         name = raw.strip().splitlines()[0].strip().replace(".py", "")
@@ -291,3 +384,17 @@ def _slug(text: str, max_len: int = 40) -> str:
     slug = re.sub(r"[^\w\s-]", "", text.lower())
     slug = re.sub(r"[\s_-]+", "_", slug).strip("_")[:max_len]
     return slug or uuid.uuid4().hex[:8]
+
+
+def _parse_complexity(raw: str) -> ComplexityResult:
+    """Парсит ответ LLM оценки сложности."""
+    raw = raw.strip()
+    is_complex = "complex" in raw.lower().split("\n")[0]
+    sub_skills: list[dict] = []
+    for m in re.finditer(r"SKILL:\s*(\S+)\s*\|\s*(\w+)\s*\|\s*(.+)", raw):
+        sub_skills.append({
+            "name": m.group(1).strip(),
+            "profile": m.group(2).strip(),
+            "description": m.group(3).strip(),
+        })
+    return ComplexityResult(is_complex=is_complex, sub_skills=sub_skills, raw=raw)

@@ -120,6 +120,27 @@ async def _run_daemon(agent: Agent, interval: int) -> None:
                 cleanup_stale(agent.settings.data_dir)
             except Exception as exc:  # noqa: BLE001
                 logger.warning("Ошибка cleanup_stale: %s", exc)
+        # Проверка расписаний (каждую итерацию — ~60 сек)
+        try:
+            results = agent.scheduler.check_and_run()
+            if results:
+                report = format_schedule_report(results)
+                logger.info("Scheduler: выполнено %d расписаний", len(results))
+                # Отправляем отчёт каждому владельцу расписания
+                for r in results:
+                    schedules = agent.scheduler.list_schedules()
+                    for s in schedules:
+                        if s.name == r.schedule_name and s.owner:
+                            from apiat.models.email import OutgoingMail
+                            status = "OK" if r.success else "ОШИБКА"
+                            agent._safe_send(OutgoingMail(
+                                to=s.owner,
+                                subject=f"APIAt: расписание '{s.name}' — {status}",
+                                body=report,
+                            ))
+                            break
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Ошибка scheduler: %s", exc)
         sleep_sec = poller.next_sleep()
         logger.debug("Следующий опрос через %.0f сек (режим: %s)", sleep_sec, poller._mode)
         time.sleep(sleep_sec)

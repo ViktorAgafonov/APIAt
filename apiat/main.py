@@ -17,6 +17,7 @@ from .models.base import TaskStatus, TaskType
 from .models.email import IncomingMail, OutgoingMail
 from .skills.builder import SkillBuilder
 from .skills.chain import ChainPlanner, ChainRunner, SkillChain
+from .skills.scheduler import Scheduler, Schedule, ScheduleTask, format_schedule_report
 from .storage.repositories import Storage
 from .tools.email_tool import EmailSender
 from .tools.registry import ToolRegistry
@@ -89,6 +90,12 @@ _SAVE_CHAIN_RE = re.compile(
 # Построить цепочку через LLM: "цепочка: <задача>"
 _CHAIN_TASK_RE = re.compile(
     r"(цепочка|chain)\s*[:\-]?\s*(.+)",
+    re.IGNORECASE,
+)
+
+# Расписание: "расписание: ..." (создание/показ/управление)
+_SCHEDULE_RE = re.compile(
+    r"(расписание|schedule)\s*[:\-]?\s*(.+)",
     re.IGNORECASE,
 )
 
@@ -212,6 +219,7 @@ class Agent:
         self.engine = WorkflowEngine(self.registry, self.settings.db_path)
         self.skill_builder = SkillBuilder(self.settings, self.settings.data_dir / "skills")
         self.chain_runner = ChainRunner(self.settings.data_dir / "skills", self.settings.data_dir)
+        self.scheduler = Scheduler(self.settings.data_dir, self.chain_runner)
         self.chain_planner = ChainPlanner(
             self.skill_builder._router, self.settings.data_dir / "skills"
         )
@@ -309,6 +317,12 @@ class Agent:
         chain_task_m = _CHAIN_TASK_RE.search(mail.body)
         if chain_task_m:
             await self._handle_chain_task(mail, chain_task_m.group(2).strip())
+            return
+
+        # Команда: управление расписаниями
+        schedule_m = _SCHEDULE_RE.search(mail.body)
+        if schedule_m:
+            await self._handle_schedule_command(mail, schedule_m.group(2).strip())
             return
 
         # Команда оператора: список LLM провайдеров
@@ -706,6 +720,128 @@ class Agent:
                 f"Цепочка '{name}' сохранена в {path.name}\n\n"
                 f"Шаги:\n{steps_desc}\n\n"
                 f"Запуск: выполни цепочку {name}: url=..."
+            ),
+            in_reply_to=mail.message_id,
+        ))
+
+    async def _handle_schedule_command(self, mail: IncomingMail, command: str) -> None:
+        """Обрабатывает команды расписания: создание, показ, включение, отключение, удаление."""
+        cmd = command.strip().lower()
+
+        # покажи / список / list
+        if cmd in ("покажи", "список", "list", "show", "статус"):
+            schedules = self.scheduler.list_schedules()
+            if not schedules:
+                body = "Расписаний пока нет.\n\n"
+            else:
+                lines = [f"Расписаний: {len(schedules)}\n"]
+                for s in schedules:
+                    status = "вкл" if s.enabled else "выкл"
+                    tasks_desc = ", ".join(f"{t.type}:{t.name}" for t in s.tasks)
+                    lines.append(f"  {s.name} [{status}] — {s.schedule}")
+                    lines.append(f"    задачи: {tasks_desc}")
+                    if s.last_run:
+                        lines.append(f"    последний запуск: {s.last_run[:16]}")
+                    lines.append("")
+                body = "\n".join(lines)
+            self._safe_send(OutgoingMail(
+                to=mail.sender,
+                subject="APIAt: расписания",
+                body=body,
+                in_reply_to=mail.message_id,
+            ))
+            return
+
+        # отключи <name>
+        m = re.match(r"(отключи|disable|pause)\s+(\S+)", cmd)
+        if m:
+            name = m.group(2)
+            ok = self.scheduler.set_enabled(name, False)
+            self._safe_send(OutgoingMail(
+                to=mail.sender,
+                subject=f"APIAt: расписание '{name}' {'отключено' if ok else 'не найдено'}",
+                body=f"Расписание '{name}' отключено." if ok else f"Расписание '{name}' не найдено.",
+                in_reply_to=mail.message_id,
+            ))
+            return
+
+        # включи <name>
+        m = re.match(r"(включи|enable|resume)\s+(\S+)", cmd)
+        if m:
+            name = m.group(2)
+            ok = self.scheduler.set_enabled(name, True)
+            self._safe_send(OutgoingMail(
+                to=mail.sender,
+                subject=f"APIAt: расписание '{name}' {'включено' if ok else 'не найдено'}",
+                body=f"Расписание '{name}' включено." if ok else f"Расписание '{name}' не найдено.",
+                in_reply_to=mail.message_id,
+            ))
+            return
+
+        # удали <name>
+        m = re.match(r"(удали|delete|remove)\s+(\S+)", cmd)
+        if m:
+            name = m.group(2)
+            ok = self.scheduler.delete_schedule(name)
+            self._safe_send(OutgoingMail(
+                to=mail.sender,
+                subject=f"APIAt: расписание '{name}' {'удалено' if ok else 'не найдено'}",
+                body=f"Расписание '{name}' удалено." if ok else f"Расписание '{name}' не найдено.",
+                in_reply_to=mail.message_id,
+            ))
+            return
+
+        # Создание расписания через LLM
+        await self._handle_schedule_create(mail, command)
+
+    async def _handle_schedule_create(self, mail: IncomingMail, command: str) -> None:
+        """Создаёт расписание через LLM-парсинг естественного языка."""
+        logger.info("Создание расписания: %s", command[:80])
+
+        available_skills = self.skill_builder.list_confirmed()
+        available_chains = self.chain_runner.list_chains()
+
+        prompt = _SCHEDULE_CREATE_PROMPT.format(
+            command=command,
+            skills=", ".join(available_skills) or "нет",
+            chains=", ".join(available_chains) or "нет",
+        )
+
+        try:
+            raw = await self.parser.router.complete(prompt)
+        except Exception as exc:  # noqa: BLE001
+            self._safe_send(OutgoingMail(
+                to=mail.sender,
+                subject="APIAt: ошибка создания расписания",
+                body=f"LLM не смог разобрать команду: {exc}",
+                in_reply_to=mail.message_id,
+            ))
+            return
+
+        schedule = _parse_schedule_response(raw, mail.sender)
+        if schedule is None:
+            self._safe_send(OutgoingMail(
+                to=mail.sender,
+                subject="APIAt: расписание не создано",
+                body=f"Не удалось разобрать ответ LLM:\n\n{raw[:500]}",
+                in_reply_to=mail.message_id,
+            ))
+            return
+
+        self.scheduler.save_schedule(schedule)
+        tasks_desc = "\n".join(f"  {t.type}: {t.name}" for t in schedule.tasks)
+        self._safe_send(OutgoingMail(
+            to=mail.sender,
+            subject=f"APIAt: расписание '{schedule.name}' создано",
+            body=(
+                f"Расписание '{schedule.name}' создано и включено.\n\n"
+                f"Период: {schedule.schedule}\n"
+                f"Задачи:\n{tasks_desc}\n\n"
+                f"Управление:\n"
+                f"  расписание: покажи\n"
+                f"  расписание: отключи {schedule.name}\n"
+                f"  расписание: включи {schedule.name}\n"
+                f"  расписание: удали {schedule.name}"
             ),
             in_reply_to=mail.message_id,
         ))
@@ -1746,3 +1882,65 @@ def _parse_env_updates(body: str) -> dict[str, str]:
             if key in allowed and value.strip():
                 result[key] = value.strip()
     return result
+
+
+_SCHEDULE_CREATE_PROMPT = """\
+Разбери команду оператора и создай расписание запуска задач.
+
+КОМАНДА ОПЕРАТОРА:
+{command}
+
+ДОСТУПНЫЕ НАВЫКИ:
+{skills}
+
+ДОСТУПНЫЕ ЦЕПОЧКИ:
+{chains}
+
+ФОРМАТЫ РАСПИСАНИЙ:
+  daily 18:00           — каждый день в 18:00
+  daily 06:00,18:00     — дважды в день
+  weekly fri 18:00      — каждую пятницу в 18:00
+  weekly sat 09:00      — каждую субботу в 09:00
+
+Дни недели: mon, tue, wed, thu, fri, sat, sun.
+
+Ответь в формате:
+NAME: <короткое_имя_английское>
+SCHEDULE: <формат_расписания>
+TASK: <skill|chain> <имя>
+TASK: <skill|chain> <имя>
+...
+
+Пример:
+NAME: daily_news
+SCHEDULE: daily 18:00
+TASK: skill fetch_daily_ru_news
+TASK: skill fetch_daily_world_news
+
+Если оператор просит несколько разных периодов — разбей на несколько блоков (NAME/SCHEDULE/TASK).
+"""
+
+
+def _parse_schedule_response(raw: str, owner: str) -> Schedule | None:
+    """Парсит ответ LLM в Schedule объект."""
+    raw = raw.strip()
+    name_match = re.search(r"NAME:\s*(\S+)", raw, re.IGNORECASE)
+    sched_match = re.search(r"SCHEDULE:\s*(.+)", raw, re.IGNORECASE)
+    task_matches = re.findall(r"TASK:\s*(\w+)\s+(\S+)", raw, re.IGNORECASE)
+
+    if not name_match or not sched_match or not task_matches:
+        return None
+
+    schedule = Schedule(
+        name=name_match.group(1).strip(),
+        schedule=sched_match.group(1).strip(),
+        owner=owner,
+        enabled=True,
+    )
+    for task_type, task_name in task_matches:
+        ttype = task_type.lower()
+        if ttype not in ("skill", "chain"):
+            ttype = "skill"
+        schedule.tasks.append(ScheduleTask(type=ttype, name=task_name.strip()))
+
+    return schedule if schedule.tasks else None

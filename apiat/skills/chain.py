@@ -41,6 +41,7 @@ class SkillChain:
     name: str
     description: str
     steps: list[ChainStep] = field(default_factory=list)
+    schedule: str = ""  # "", "daily", "weekly" — для автозапуска
 
     def to_dict(self) -> dict:
         return {
@@ -50,6 +51,7 @@ class SkillChain:
                 {"skill": s.skill, "params": s.params, "description": s.description}
                 for s in self.steps
             ],
+            "schedule": self.schedule,
         }
 
     @classmethod
@@ -65,6 +67,7 @@ class SkillChain:
                 )
                 for s in d.get("steps", [])
             ],
+            schedule=d.get("schedule", ""),
         )
 
     @classmethod

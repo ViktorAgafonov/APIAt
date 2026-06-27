@@ -136,12 +136,15 @@ class SkillBuilder:
 
         # Шаг 1: генерация кода
         result.steps.append("1. Генерация кода...")
+        logger.info("Skill build: генерация кода для задания: %s", user_prompt[:100])
         code = await self._generate_code(user_prompt)
         if not code:
             result.error = "LLM не вернул код"
+            logger.warning("Skill build: LLM не вернул код")
             return result
         cfg = SkillConfig.from_code(code)
         result.steps.append(f"   Сгенерировано {len(code)} символов, профиль: {cfg.profile}")
+        logger.info("Skill build: код сгенерирован (%d символов, профиль=%s)", len(code), cfg.profile)
 
         # Шаг 2: ревью (только если работаем через primary LLM)
         if not using_fallback:
@@ -154,9 +157,11 @@ class SkillBuilder:
                 result.error = f"Ревью отклонило код: {review}"
                 return result
             result.steps.append(f"   Ревью: одобрено")
+            logger.info("Skill build: ревью одобрено")
         else:
             result.steps.append("2. Ревью пропущено (работа через fallback LLM)")
             result.review_verdict = "пропущено (fallback)"
+            logger.info("Skill build: ревью пропущено (fallback)")
 
         # Шаг 3: sandbox-тест
         result.steps.append(f"3. Запуск в Docker sandbox (profile={cfg.profile})...")
@@ -165,8 +170,10 @@ class SkillBuilder:
         if not sandbox_res.success:
             result.steps.append(f"   Sandbox: ошибка (exit {sandbox_res.exit_code})")
             result.error = f"Sandbox ошибка: {sandbox_res.stderr[:500]}"
+            logger.warning("Skill build: sandbox ошибка (exit %d): %s", sandbox_res.exit_code, sandbox_res.stderr[:200])
             return result
         result.steps.append(f"   Sandbox: OK, вывод {len(sandbox_res.stdout)} символов")
+        logger.info("Skill build: sandbox OK, вывод %d символов: %s", len(sandbox_res.stdout), sandbox_res.stdout[:150])
 
         # Шаг 4: валидация вывода той же LLM что генерировала
         result.steps.append("4. Валидация вывода LLM...")
@@ -176,8 +183,10 @@ class SkillBuilder:
         if verdict_lower.startswith("нет") or verdict_lower.startswith("no"):
             result.steps.append(f"   Валидация: не соответствует — {validate}")
             result.error = f"Вывод не соответствует заданию: {validate}"
+            logger.warning("Skill build: валидация отклонила: %s", validate[:200])
             return result
         result.steps.append("   Валидация: соответствует заданию")
+        logger.info("Skill build: валидация прошла успешно")
 
         # Шаг 5: сохранение в pending
         skill_name = await self._generate_name(user_prompt)

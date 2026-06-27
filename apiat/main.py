@@ -1622,6 +1622,7 @@ class Agent:
         mails = self.imap.fetch_unseen()
         logger.info("Получено новых писем: %d", len(mails))
         for mail in mails:
+            logger.info("Обработка письма от %s: \"%s\"", mail.sender, mail.subject[:80])
             await self.process_mail(mail)
         return len(mails)
 

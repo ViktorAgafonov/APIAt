@@ -93,7 +93,7 @@ class EmailSender:
             )
 
         self._transport(msg)
-        logger.info("Письмо отправлено на %s (вложений: %d)", mail.to, len(mail.attachments))
+        logger.info("Письмо отправлено на %s (вложений: %d) \"%s\"", mail.to, len(mail.attachments), subject)
 
     def _transport(self, msg: EmailMessage) -> None:
         if self._s.smtp_use_ssl:

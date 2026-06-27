@@ -54,6 +54,7 @@ def cleanup_stale(data_dir: Path) -> None:
     _remove_old(data_dir / "downloads" / "failed", max_age_sec=3 * 86400)
     _remove_old(data_dir / "youtube" / "pending", max_age_sec=2 * 3600)
     _remove_old(data_dir / "attachments", max_age_sec=24 * 3600)
+    _remove_old(data_dir / "skills" / "pending", max_age_sec=7 * 86400)
     # Осиротевшие shm-директории (если процесс упал)
     if _SHM_ROOT.exists():
         _remove_old(_SHM_ROOT, max_age_sec=3600)

@@ -201,6 +201,7 @@ class Agent:
         self.sender = EmailSender(self.settings)
         self.mail_ring = MailRingLog(self.settings.data_dir / "logs")
         self._pending_chains: dict[str, SkillChain] = {}  # run_id -> chain (ожидают сохранения)
+        self._pending_chains_limit = 10
         self._current_mail: IncomingMail | None = None  # для thread-заголовков в _safe_send
         self._init_llm_components()
 
@@ -630,6 +631,10 @@ class Agent:
 
         # Храним цепочку для возможного сохранения
         self._pending_chains[chain.name] = chain
+        # Вытесняем старые если превышен лимит
+        while len(self._pending_chains) > self._pending_chains_limit:
+            oldest_key = next(iter(self._pending_chains))
+            del self._pending_chains[oldest_key]
 
         steps_desc = "\n".join(
             f"  {i+1}. {s.skill}: {s.description}" for i, s in enumerate(chain.steps)

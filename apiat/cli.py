@@ -103,6 +103,8 @@ class _PollMode:
 async def _run_daemon(agent: Agent, interval: int) -> None:
     logger.info("Запуск демона, базовый интервал: %d сек", interval)
     poller = _PollMode(interval)
+    cleanup_counter = 0
+    _CLEANUP_EVERY = 50  # каждые ~50 итераций (~50 мин при interval=60)
     while True:
         try:
             count = await agent.run_once()
@@ -110,6 +112,14 @@ async def _run_daemon(agent: Agent, interval: int) -> None:
         except Exception:  # noqa: BLE001 - демон не должен падать на одной итерации
             logger.exception("Ошибка итерации демона")
             count = 0
+        # Периодическая очистка устаревших файлов
+        cleanup_counter += 1
+        if cleanup_counter >= _CLEANUP_EVERY:
+            cleanup_counter = 0
+            try:
+                cleanup_stale(agent.settings.data_dir)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Ошибка cleanup_stale: %s", exc)
         sleep_sec = poller.next_sleep()
         logger.debug("Следующий опрос через %.0f сек (режим: %s)", sleep_sec, poller._mode)
         time.sleep(sleep_sec)

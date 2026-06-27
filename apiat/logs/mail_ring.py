@@ -21,6 +21,7 @@ def _mask_token(text: str, token: str) -> str:
 _RING_SIZE = 50
 _RING_FILE = "mail_ring.json"
 _REC_FILE = "recommendations.json"
+_REC_MAX = 20  # максимум сохраняемых рекомендаций
 
 
 class MailRingLog:
@@ -83,6 +84,9 @@ class MailRingLog:
             "author": author,
             "text": text,
         })
+        # Ограничиваем количество сохраняемых рекомендаций
+        if len(recs) > _REC_MAX:
+            recs = recs[-_REC_MAX:]
         self._rec_path.write_text(
             json.dumps(recs, ensure_ascii=False, indent=2),
             encoding="utf-8",

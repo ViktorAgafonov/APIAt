@@ -29,6 +29,8 @@ class Storage:
             conn.execute("DELETE FROM history        WHERE created_at  < datetime('now', '-45 days')")
             conn.execute("DELETE FROM results        WHERE created_at  < datetime('now', '-45 days')")
             conn.execute("DELETE FROM tasks          WHERE updated_at  < datetime('now', '-45 days')")
+            conn.execute("DELETE FROM mail_threads   WHERE created_at  < datetime('now', '-45 days')")
+            conn.execute("DELETE FROM pending_sends  WHERE created_at  < datetime('now', '-7 days')")
             conn.commit()
             conn.execute("VACUUM")
         finally:

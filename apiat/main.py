@@ -93,9 +93,9 @@ _CHAIN_TASK_RE = re.compile(
     re.IGNORECASE,
 )
 
-# Расписание: "расписание: ..." (создание/показ/управление)
+# Расписание: "расписание: ..." / "запланируй: ..." / "поставь график: ..."
 _SCHEDULE_RE = re.compile(
-    r"(расписание|schedule)\s*[:\-]?\s*(.+)",
+    r"(расписание|запланируй|план|график|таймер|schedule|plan)\s*[:\-]?\s*(.+)",
     re.IGNORECASE,
 )
 
@@ -728,8 +728,11 @@ class Agent:
         """Обрабатывает команды расписания: создание, показ, включение, отключение, удаление."""
         cmd = command.strip().lower()
 
-        # покажи / список / list
-        if cmd in ("покажи", "список", "list", "show", "статус"):
+        # показать / список / статус
+        if cmd in ("покажи", "покажи все", "список", "список расписаний",
+                    "какие", "какие есть", "что запланировано", "что по расписанию",
+                    "статус", "статус расписаний",
+                    "list", "show", "status"):
             schedules = self.scheduler.list_schedules()
             if not schedules:
                 body = "Расписаний пока нет.\n\n"
@@ -752,8 +755,8 @@ class Agent:
             ))
             return
 
-        # отключи <name>
-        m = re.match(r"(отключи|disable|pause)\s+(\S+)", cmd)
+        # отключи / останови / приостанови / пауза / стоп / заморозь <name>
+        m = re.match(r"(отключи|останови|приостанови|поставь\s+на\s+паузу|пауза|стоп|заморозь|disable|pause|stop)\s+(\S+)", cmd)
         if m:
             name = m.group(2)
             ok = self.scheduler.set_enabled(name, False)
@@ -765,8 +768,8 @@ class Agent:
             ))
             return
 
-        # включи <name>
-        m = re.match(r"(включи|enable|resume)\s+(\S+)", cmd)
+        # включи / запусти / возобнови / продолжи / разморозь / активируй <name>
+        m = re.match(r"(включи|запусти|возобнови|продолжи|разморозь|активируй|enable|resume|start)\s+(\S+)", cmd)
         if m:
             name = m.group(2)
             ok = self.scheduler.set_enabled(name, True)
@@ -778,8 +781,8 @@ class Agent:
             ))
             return
 
-        # удали <name>
-        m = re.match(r"(удали|delete|remove)\s+(\S+)", cmd)
+        # удали / убери / отмени / выкинь / сотри <name>
+        m = re.match(r"(удали|убери|отмени|выкинь|сотри|delete|remove|cancel)\s+(\S+)", cmd)
         if m:
             name = m.group(2)
             ok = self.scheduler.delete_schedule(name)

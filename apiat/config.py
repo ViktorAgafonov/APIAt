@@ -70,6 +70,12 @@ class Settings(BaseSettings):
     poll_interval: int = Field(default=60, alias="POLL_INTERVAL")
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
 
+    # --- Лимиты отправки ---
+    body_limit: int = Field(default=50_000, alias="BODY_LIMIT")
+    attachment_limit_mb: float = Field(default=25.0, alias="ATTACHMENT_LIMIT_MB")
+    zip_threshold: int = Field(default=100_000, alias="ZIP_THRESHOLD")
+    max_chain_steps: int = Field(default=10, alias="MAX_CHAIN_STEPS")
+
     @field_validator("whitelist", mode="before")
     @classmethod
     def _split_whitelist(cls, value: object) -> object:
@@ -83,6 +89,10 @@ class Settings(BaseSettings):
     def _ensure_trailing_slash(cls, value: str) -> str:
         # SDK добавляет относительный путь chat/completions — слеш обязателен
         return value if value.endswith("/") else value + "/"
+
+    @property
+    def attachment_limit_bytes(self) -> int:
+        return int(self.attachment_limit_mb * 1024 * 1024)
 
     def llm_providers(self) -> list[LlmProviderConfig]:
         """Возвращает список провайдеров по приоритету (primary первый, fallback второй)."""

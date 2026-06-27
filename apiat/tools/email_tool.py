@@ -14,9 +14,6 @@ from ..utils.logging import get_logger
 logger = get_logger(__name__)
 
 
-_BODY_LIMIT = 50_000  # символов — если больше, бьём на части
-
-
 def _msg_id(value: str) -> str:
     """Нормализует Message-ID: оборачивает в <> если ещё не обёрнут."""
     v = value.strip()
@@ -27,6 +24,13 @@ def _msg_id(value: str) -> str:
     return f"<{v}>"
 
 
+def estimate_email_count(body_len: int, body_limit: int = 50_000) -> int:
+    """Оценивает количество писем для заданного размера тела."""
+    if body_len <= 0:
+        return 0
+    return (body_len + body_limit - 1) // body_limit
+
+
 class EmailSender:
     """Отправляет письма через SMTP. Поддерживает вложения."""
 
@@ -34,11 +38,12 @@ class EmailSender:
         self._s = settings
 
     def send(self, mail: OutgoingMail) -> None:
-        """Отправляет письмо. Если тело > _BODY_LIMIT символов — разбивает на части."""
-        if len(mail.body) <= _BODY_LIMIT:
+        """Отправляет письмо. Если тело > body_limit символов — разбивает на части."""
+        limit = self._s.body_limit
+        if len(mail.body) <= limit:
             self._send_single(mail)
             return
-        parts = [mail.body[i:i + _BODY_LIMIT] for i in range(0, len(mail.body), _BODY_LIMIT)]
+        parts = [mail.body[i:i + limit] for i in range(0, len(mail.body), limit)]
         total = len(parts)
         for idx, chunk in enumerate(parts, 1):
             part_mail = mail.model_copy(update={

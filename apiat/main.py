@@ -140,6 +140,18 @@ _SCREENSHOT_RE = re.compile(
     re.IGNORECASE | re.DOTALL,
 )
 
+# Ответ на запрос подтверждения отправки: "да" / "zip" / "zip 3"
+_CONFIRM_SEND_RE = re.compile(
+    r"^\s*(да|yes|zip(?:\s+(\d+))?)\s*$",
+    re.IGNORECASE,
+)
+
+# Команда управления лимитами: "лимит" / "лимит body_limit=50000"
+_LIMIT_CMD_RE = re.compile(
+    r"(лимит|limits?)\s*[:\-]?",
+    re.IGNORECASE,
+)
+
 
 def _strip_quotations(text: str) -> str:
     """Убирает цитаты предыдущих писем из ответного письма.
@@ -321,6 +333,17 @@ class Agent:
         shot_m = _SCREENSHOT_RE.search(mail.body)
         if shot_m:
             await self._handle_screenshot(mail, shot_m.group(2).strip())
+            return
+
+        # Ответ на запрос подтверждения отправки (да / zip / zip N)
+        confirm_m = _CONFIRM_SEND_RE.search(mail.body.strip())
+        if confirm_m:
+            await self._handle_send_confirmation(mail, confirm_m)
+            return
+
+        # Команда: управление лимитами
+        if _LIMIT_CMD_RE.search(mail.body):
+            self._handle_limit_command(mail)
             return
 
         # Помощь
@@ -565,7 +588,7 @@ class Agent:
             ))
             return
 
-        run_result = self.chain_runner.run(chain, params)
+        run_result = self.chain_runner.run(chain, params, max_steps=self.settings.max_chain_steps)
         report = run_result.report()
 
         # Храним цепочку для возможного сохранения
@@ -600,7 +623,7 @@ class Agent:
                 in_reply_to=mail.message_id,
             ))
             return
-        run_result = self.chain_runner.run(chain, params)
+        run_result = self.chain_runner.run(chain, params, max_steps=self.settings.max_chain_steps)
         self._safe_send(OutgoingMail(
             to=mail.sender,
             subject=f"APIAt: цепочка '{name}' {'OK' if run_result.success else 'ОШИБКА'}",
@@ -962,6 +985,7 @@ class Agent:
             "  список llm              — статус LLM-провайдеров",
             "  переключи llm           — поменять местами primary и fallback",
             "  переключи llm + KEY=..  — записать новые параметры LLM",
+            "  лимит                  — показать/установить лимиты отправки",
             "",
             "## Самообучение и навыки",
             "  самообучись: <описание>         — создать навык: LLM → ревью → sandbox",
@@ -1151,16 +1175,29 @@ class Agent:
     def _reply_result(
         self, mail: IncomingMail, task_name: str, status: str, result: dict, elapsed: float
     ) -> None:
-        """Формирует и отправляет ответ с результатом."""
+        """Формирует и отправляет ответ с результатом.
+
+        Если тело > zip_threshold — сохраняет в pending_sends и запрашивает подтверждение
+        у оператора (отправить частями / zip / zip N частей).
+        """
         from .models.email import Attachment
 
         attachments = [Attachment(**a) for a in result.get("attachments", [])]
+        summary = result.get("summary") or result.get("error", "")
         body = (
             f"Task: {task_name}\n"
             f"Status: {status}\n\n"
-            f"{result.get('summary') or result.get('error', '')}\n\n"
+            f"{summary}\n\n"
             f"Execution Time: {elapsed:.1f} sec"
         )
+
+        # Gate: если результат большой — запрашиваем подтверждение
+        if len(summary) > self.settings.zip_threshold:
+            self._request_send_confirmation(
+                mail, task_name, status, summary, attachments, elapsed
+            )
+            return
+
         self._safe_send(
             OutgoingMail(
                 to=mail.sender,
@@ -1170,6 +1207,203 @@ class Agent:
                 in_reply_to=mail.message_id,
             )
         )
+
+    def _request_send_confirmation(
+        self,
+        mail: IncomingMail,
+        task_name: str,
+        status: str,
+        body: str,
+        attachments: list,
+        elapsed: float,
+    ) -> None:
+        """Сохраняет результат в pending_sends и отправляет вопрос оператору."""
+        import json as _json
+        import uuid as _uuid
+        from .tools.email_tool import estimate_email_count
+        from .utils.zip_util import estimate_zip_size
+
+        token = _uuid.uuid4().hex[:12]
+        att_json = _json.dumps(
+            [{"filename": a.filename, "path": a.path, "content_type": a.content_type}
+             for a in attachments],
+            ensure_ascii=False,
+        )
+        self.storage.save_pending_send(
+            token=token,
+            sender=mail.sender,
+            subject=f"APIAt: {task_name} [{status}]",
+            body=body,
+            attachments=att_json,
+            task_name=task_name,
+            status=status,
+            elapsed=elapsed,
+            message_id=mail.message_id,
+        )
+
+        email_count = estimate_email_count(len(body), self.settings.body_limit)
+        zip_size = estimate_zip_size(body)
+        zip_mb = zip_size / (1024 * 1024)
+        limit_mb = self.settings.attachment_limit_mb
+
+        lines = [
+            f"Результат: {len(body):,} символов",
+            f"Если отправить текстом: {email_count} писем (лимит {self.settings.body_limit:,} симв.)",
+            f"Если сжать в zip: ~{zip_mb:.1f} MB (лимит вложения {limit_mb} MB)",
+        ]
+        if zip_mb > limit_mb:
+            parts = int(zip_mb / limit_mb) + 1
+            lines.append(f"Zip превысит лимит — потребуется разбить на ~{parts} частей")
+        lines.append("")
+        lines.append("Ответьте одним из вариантов:")
+        lines.append("  да       — отправить текстом (частями)")
+        lines.append("  zip      — сжать в zip и отправить одним письмом")
+        lines.append("  zip 3    — сжать в zip и разбить на 3 части")
+
+        self._safe_send(OutgoingMail(
+            to=mail.sender,
+            subject=f"APIAt: {task_name} — подтверждение отправки",
+            body="\n".join(lines),
+            in_reply_to=mail.message_id,
+        ))
+
+    async def _handle_send_confirmation(self, mail: IncomingMail, match: re.Match) -> None:
+        """Обрабатывает ответ оператора на запрос подтверждения отправки."""
+        import json as _json
+        from .models.email import Attachment
+        from .utils.zip_util import zip_text, split_zip
+
+        pending = self.storage.load_pending_send_by_sender(mail.sender)
+        if not pending:
+            self._reply(mail, "APIAt: нет отложенных отправок",
+                        "Для вас нет ожидающих подтверждения результатов.")
+            return
+
+        body = pending["body"]
+        subject = pending["subject"]
+        task_name = pending["task_name"]
+        elapsed = pending["elapsed"] or 0.0
+        msg_id = pending["message_id"] or ""
+        att_data = _json.loads(pending["attachments"]) if pending["attachments"] else []
+        attachments = [Attachment(**a) for a in att_data]
+
+        choice = match.group(1).lower().strip()
+        zip_parts = match.group(2)  # число частей для "zip N"
+
+        if choice in ("да", "yes"):
+            # Отправить текстом частями (EmailSender сам разобьёт)
+            self._safe_send(OutgoingMail(
+                to=mail.sender,
+                subject=subject,
+                body=body,
+                attachments=attachments,
+                in_reply_to=msg_id,
+            ))
+            self.storage.delete_pending_send(pending["token"])
+            return
+
+        if choice.startswith("zip"):
+            # Сжимаем в zip
+            zip_path = zip_text(body, filename=f"{task_name}.txt",
+                                zip_name=f"{task_name}.zip")
+            if zip_parts and int(zip_parts) > 1:
+                # Разбиваем на N частей
+                parts = int(zip_parts)
+                split_paths = split_zip(zip_path, parts)
+                for idx, part_path in enumerate(split_paths, 1):
+                    self._safe_send(OutgoingMail(
+                        to=mail.sender,
+                        subject=f"{subject} [zip part {idx}/{parts}]",
+                        body=f"Часть {idx} из {parts}. Соберите все части и распакуйте.",
+                        attachments=[Attachment(
+                            filename=part_path.name,
+                            content_type="application/octet-stream",
+                            path=str(part_path),
+                        )],
+                        in_reply_to=msg_id,
+                    ))
+            else:
+                # Одним письмом с zip-вложением
+                self._safe_send(OutgoingMail(
+                    to=mail.sender,
+                    subject=subject,
+                    body=f"Результат сжат в zip: {task_name}.zip",
+                    attachments=[Attachment(
+                        filename=zip_path.name,
+                        content_type="application/zip",
+                        path=str(zip_path),
+                    )],
+                    in_reply_to=msg_id,
+                ))
+            self.storage.delete_pending_send(pending["token"])
+            return
+
+    def _handle_limit_command(self, mail: IncomingMail) -> None:
+        """Показывает или устанавливает лимиты отправки.
+
+        Формат:
+            лимит                    — показать текущие лимиты
+            лиммит body_limit=50000  — установить body_limit
+            лимит attachment_limit_mb=15  — установить лимит вложения
+            лимит zip_threshold=80000     — установить порог zip
+        """
+        allowed = {"body_limit", "attachment_limit_mb", "zip_threshold", "max_chain_steps"}
+        updates: dict[str, str] = {}
+        for line in mail.body.splitlines():
+            line = line.strip()
+            if "=" in line and not line.startswith("#"):
+                key, _, value = line.partition("=")
+                key = key.strip().lower()
+                if key in allowed and value.strip():
+                    updates[key] = value.strip()
+
+        if not updates:
+            # Показать текущие лимиты
+            lines = [
+                "Текущие лимиты отправки:",
+                f"  body_limit         = {self.settings.body_limit:,} символов",
+                f"  attachment_limit_mb = {self.settings.attachment_limit_mb} MB",
+                f"  zip_threshold      = {self.settings.zip_threshold:,} символов",
+                f"  max_chain_steps    = {self.settings.max_chain_steps}",
+                "",
+                "Для изменения отправьте:",
+                "  лимит body_limit=50000",
+                "  лимит attachment_limit_mb=15",
+                "  лимит zip_threshold=80000",
+                "  лимит max_chain_steps=15",
+            ]
+            self._reply(mail, "APIAt: лимиты", "\n".join(lines))
+            return
+
+        # Применяем изменения через БД settings
+        applied: list[str] = []
+        for key, value in updates.items():
+            try:
+                if key in ("body_limit", "zip_threshold", "max_chain_steps"):
+                    int(value)
+                elif key == "attachment_limit_mb":
+                    float(value)
+            except ValueError:
+                applied.append(f"  {key}: НЕВЕРНОЕ ЗНАЧЕНИЕ '{value}'")
+                continue
+            self.storage.set_setting(f"limit:{key}", value)
+            applied.append(f"  {key} = {value}")
+
+        # Применяем к текущему экземпляру settings
+        for key, value in updates.items():
+            try:
+                if key == "body_limit":
+                    self.settings.body_limit = int(value)
+                elif key == "attachment_limit_mb":
+                    self.settings.attachment_limit_mb = float(value)
+                elif key == "zip_threshold":
+                    self.settings.zip_threshold = int(value)
+                elif key == "max_chain_steps":
+                    self.settings.max_chain_steps = int(value)
+            except (ValueError, TypeError):
+                pass
+
+        self._reply(mail, "APIAt: лимиты обновлены", "\n".join(applied))
 
     def _format_thread_context(self, thread: list[dict]) -> str:
         """Формирует текст с предыдущими письмами для LLM."""

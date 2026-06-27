@@ -151,8 +151,12 @@ class ChainRunner:
         self,
         chain: SkillChain,
         input_params: dict[str, str] | None = None,
+        max_steps: int = 10,
     ) -> ChainRunResult:
-        """Выполняет все шаги цепочки последовательно."""
+        """Выполняет все шаги цепочки последовательно.
+
+        Превышение max_steps — аварийная остановка (защита от зацикливания).
+        """
         input_params = input_params or {}
         run_id = uuid.uuid4().hex[:8]
         work_dir = self._data_dir / "tmp" / f"chain_{run_id}"
@@ -162,7 +166,12 @@ class ChainRunner:
         context: dict[str, str] = {}  # накапливаемый контекст между шагами
 
         try:
-            for step in chain.steps:
+            for i, step in enumerate(chain.steps):
+                if i >= max_steps:
+                    result.success = False
+                    result.error = f"Превышен лимит шагов ({max_steps}). Цепочка остановлена."
+                    logger.warning("Chain '%s' aborted: max_steps=%d exceeded", chain.name, max_steps)
+                    break
                 step_result = self._run_step(step, input_params, context, work_dir)
                 result.steps.append(step_result)
                 if not step_result.success:

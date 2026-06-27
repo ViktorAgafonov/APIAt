@@ -313,3 +313,54 @@ class Storage:
             return row["value"] if row else None
         finally:
             conn.close()
+
+    # --- отложенные отправки (pending_sends) ---
+    def save_pending_send(self, token: str, sender: str, subject: str,
+                          body: str, attachments: str, task_name: str,
+                          status: str, elapsed: float, message_id: str) -> None:
+        conn = self._conn()
+        try:
+            conn.execute(
+                """INSERT INTO pending_sends (token, sender, subject, body, attachments,
+                   task_name, status, elapsed, message_id)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(token) DO UPDATE SET
+                     sender=excluded.sender, subject=excluded.subject,
+                     body=excluded.body, attachments=excluded.attachments,
+                     task_name=excluded.task_name, status=excluded.status,
+                     elapsed=excluded.elapsed, message_id=excluded.message_id""",
+                (token, sender, subject, body, attachments, task_name, status, elapsed, message_id),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def load_pending_send(self, token: str) -> dict | None:
+        conn = self._conn()
+        try:
+            row = conn.execute(
+                "SELECT * FROM pending_sends WHERE token = ?", (token,)
+            ).fetchone()
+            return dict(row) if row else None
+        finally:
+            conn.close()
+
+    def load_pending_send_by_sender(self, sender: str) -> dict | None:
+        """Возвращает последний pending_send от отправителя."""
+        conn = self._conn()
+        try:
+            row = conn.execute(
+                "SELECT * FROM pending_sends WHERE sender = ? ORDER BY created_at DESC LIMIT 1",
+                (sender,),
+            ).fetchone()
+            return dict(row) if row else None
+        finally:
+            conn.close()
+
+    def delete_pending_send(self, token: str) -> None:
+        conn = self._conn()
+        try:
+            conn.execute("DELETE FROM pending_sends WHERE token = ?", (token,))
+            conn.commit()
+        finally:
+            conn.close()

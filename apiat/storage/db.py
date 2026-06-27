@@ -70,6 +70,20 @@ CREATE TABLE IF NOT EXISTS mail_threads (
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_mail_threads_refs ON mail_threads(refs);
+
+CREATE TABLE IF NOT EXISTS pending_sends (
+    token       TEXT PRIMARY KEY,
+    sender      TEXT NOT NULL,
+    subject     TEXT,
+    body        TEXT,
+    attachments TEXT,
+    task_name   TEXT,
+    status      TEXT,
+    elapsed     REAL,
+    message_id  TEXT,
+    created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_pending_sends_sender ON pending_sends(sender);
 """
 
 

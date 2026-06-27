@@ -245,6 +245,14 @@ class Agent:
         body = _strip_quotations(mail.body)
         # Нормализуем неразрывные пробелы (\xa0 от inbox.ru и др.) → обычный пробел
         body = body.replace("\xa0", " ").replace("\u2009", " ").replace("\u200b", "")
+        # Удаляем секретный токен из тела — он нужен только для авторизации
+        if self.settings.secret_token:
+            body = re.sub(
+                rf"(?i)\b{re.escape(self.settings.secret_token)}\b[,\s]*",
+                "",
+                body,
+            )
+            body = body.strip()
         mail = mail.model_copy(update={"body": body})
         logger.debug("Тело письма (repr): %r", body[:200])
 

@@ -76,10 +76,11 @@ class ServerTool(Tool):
         except Exception as e:  # noqa: BLE001
             return ToolResult(success=False, summary=f"Ошибка чтения логов: {e}", error=str(e))
 
-        # LLM-анализ логов
-        if self._router is not None and query:
+        # LLM-анализ логов (всегда если router доступен)
+        if self._router is not None:
+            analysis_query = query or "Проанализируй логи приложения, найди ошибки и аномалии"
             try:
-                prompt = _LLM_ANALYZE_PROMPT.format(query=query, lines=lines, logs=logs[-8000:])
+                prompt = _LLM_ANALYZE_PROMPT.format(query=analysis_query, lines=lines, logs=logs[-8000:])
                 analysis = await self._router.complete(prompt)
                 return ToolResult(
                     success=True,

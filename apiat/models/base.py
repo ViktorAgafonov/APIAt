@@ -31,6 +31,7 @@ class TaskType(str, Enum):
     FILE = "file"
     SKILL = "skill"
     CHAIN = "chain"
+    SERVER = "server"
 
 
 def _now() -> datetime:

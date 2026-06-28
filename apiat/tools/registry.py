@@ -10,6 +10,7 @@ from .base import Tool
 from .browser_tool import BrowserTool
 from .download_tool import DownloadTool
 from .search_tool import SearchTool
+from .server_tool import ServerTool
 from .youtube_tool import YoutubeTool
 
 
@@ -23,6 +24,7 @@ class ToolRegistry:
             "download": DownloadTool(data_dir),
             "browser": BrowserTool(storage=storage),
             "archive": ArchiveTool(data_dir),
+            "server": ServerTool(llm_router=llm_router),
         }
         # Соответствие тип задачи -> имя инструмента
         self._by_type: dict[TaskType, str] = {
@@ -32,6 +34,7 @@ class ToolRegistry:
             TaskType.DOWNLOAD: "download",
             TaskType.BROWSER: "browser",
             TaskType.FILE: "archive",
+            TaskType.SERVER: "server",
         }
 
     def get(self, name: str) -> Tool | None:

@@ -14,6 +14,7 @@ TASK_WORKFLOW_MAP: dict[TaskType, str] = {
     TaskType.FILE: "FileWorkflow",
     TaskType.SKILL: "SkillWorkflow",
     TaskType.CHAIN: "ChainWorkflow",
+    TaskType.SERVER: "ServerWorkflow",
 }
 
 

@@ -88,8 +88,17 @@ class ChainTask(BaseTask):
     params: dict = Field(default_factory=dict)
 
 
+class ServerTask(BaseTask):
+    """Серверная задача: анализ логов, статус сервиса, диски, процессы."""
+
+    type: Literal[TaskType.SERVER] = TaskType.SERVER
+    action: Literal["logs", "status", "disk", "processes", "custom"]
+    query: str = ""  # дополнительный текст запроса оператора
+    lines: int = 100  # сколько строк логов прочитать
+
+
 # Дискриминируемое объединение для типобезопасного парсинга
 AnyTask = Annotated[
-    Union[SearchTask, NewsTask, DownloadTask, YoutubeTask, BrowserTask, FileTask, SkillTask, ChainTask],
+    Union[SearchTask, NewsTask, DownloadTask, YoutubeTask, BrowserTask, FileTask, SkillTask, ChainTask, ServerTask],
     Field(discriminator="type"),
 ]

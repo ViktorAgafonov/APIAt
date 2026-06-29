@@ -107,6 +107,14 @@ class SearchTool(Tool):
         task_type = getattr(task, "type", None)
         is_news = task_type == TaskType.NEWS
 
+        # Fallback: если LLM оставил query/topic пустым, пробуем извлечь из других полей
+        if not query:
+            # Для NewsTask topic может быть пустым — используем дефолт
+            if is_news:
+                query = "последние новости сегодня"
+            else:
+                query = "последние новости"
+
         # И NEWS и SEARCH идут через один путь: RSS → LLM-суммаризация
         return await self._search(query, max_results, is_news)
 
